@@ -12,10 +12,28 @@ import { log, db, fetchData } from './utils.js';
 import { config } from './config.js';
 import { initializeDatabase } from './initDb.js';
 import fs from 'fs';
+import axios from 'axios';
 
 // Ensure data and logs directories exist
 if (!fs.existsSync('./data')) fs.mkdirSync('./data');
 if (!fs.existsSync('./logs')) fs.mkdirSync('./logs');
+
+// set blockHeight in config if not specified
+async function initializeBlockHeight() {
+  if (config.blockHeight == null) {
+    try {
+      const response = await axios.get("https://rpc.sei.basementnodes.ca/block");
+      // Parse the block height and update the config
+      config.blockHeight = parseInt(response.data.block.header.height, 10);
+      log(`Block height not specified. Using fetched blockHeight: ${config.blockHeight}`, 'INFO');
+    } catch (error) {
+      log(`Failed to fetch block height: ${error.message}`, 'ERROR');
+      throw error;
+    }
+  } else {
+    log(`Using configured blockHeight: ${config.blockHeight}`, 'INFO');
+  }
+}
 
 async function fetchCodeIdForContract(contractAddress) {
   const url = `${config.restAddress}/cosmwasm/wasm/v1/contract/${contractAddress}`;
@@ -29,17 +47,14 @@ async function fetchCodeIdForContract(contractAddress) {
 
 async function seedContracts() {
   const contracts = [
-    "sei1pkteljh83a83gmazcvam474f7dwt9wzcyqcf5puxvqqs6jcx8nnq2y74lu",
-    "sei1g2a0q3tddzs7vf7lk45c2tgufsaqerxmsdr2cprth3mjtuqxm60qdmravc",
-    "sei13zrt6ts27fd7rl3hfha7t63udghm0d904ds68h5wsvkkx5md9jqqkd7z5j",
-    "sei1hrndqntlvtmx2kepr0zsfgr7nzjptcc72cr4ppk4yav58vvy7v3s4er8ed"
+    "sei1fnett9fpkdn9u6uufpdypsxeatd75y0r30nayqaaj9kx5jssrzhq9d2zvx"
   ];
 
   try {
     log('Starting contract seeding process...', 'INFO');
 
     for (const contractAddress of contracts) {
-      log(`Attempting to fetch code_id for ${contractAddress}`, 'DEBUG'); // Add this
+      log(`Attempting to fetch code_id for ${contractAddress}`, 'DEBUG');
       const codeId = await fetchCodeIdForContract(contractAddress);
       
       db.transaction(() => {
@@ -68,6 +83,7 @@ async function seedContracts() {
 
 async function runTestIndexer() {
   try {
+    await initializeBlockHeight();
     log('Test Indexer started', 'INFO');
     
     const steps = [
