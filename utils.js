@@ -47,6 +47,22 @@ export function log(message, level = 'INFO') {
   }
 }
 
+export async function initializeBlockHeight() {
+  if (config.blockHeight == null) {
+    try {
+      const response = await axios.get("https://rpc.sei.basementnodes.ca/block");
+      // Parse the block height from the response and assign it to config
+      config.blockHeight = parseInt(response.data.block.header.height, 10);
+      log(`Block height not specified. Using fetched blockHeight: ${config.blockHeight}`, 'INFO');
+    } catch (error) {
+      log(`Failed to fetch block height: ${error.message}`, 'ERROR');
+      throw error;
+    }
+  } else {
+    log(`Using configured blockHeight: ${config.blockHeight}`, 'INFO');
+  }
+}
+
 // Retry function with exponential backoff and jitter
 export async function retryOperation(operation, retries = 3, delay = 1000, backoffFactor = 2) {
   for (let i = 0; i < retries; i++) {

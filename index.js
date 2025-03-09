@@ -14,7 +14,8 @@ import {
   createWebSocketConnection,
   log,
   checkProgress,
-  updateProgress
+  updateProgress,
+  initializeBlockHeight
 } from './utils.js';
 import { config } from './config.js';
 import { initializeDatabase } from './initDb.js';
@@ -24,23 +25,6 @@ import axios from 'axios';
 // Ensure data and logs directories exist
 if (!fs.existsSync('./data')) fs.mkdirSync('./data');
 if (!fs.existsSync('./logs')) fs.mkdirSync('./logs');
-
-// Set blockHeight config if not specified
-async function initializeBlockHeight() {
-  if (config.blockHeight == null) {
-    try {
-      const response = await axios.get("https://rpc.sei.basementnodes.ca/block");
-      // Parse the block height from the response and assign it to config
-      config.blockHeight = parseInt(response.data.block.header.height, 10);
-      log(`Block height not specified. Using fetched blockHeight: ${config.blockHeight}`, 'INFO');
-    } catch (error) {
-      log(`Failed to fetch block height: ${error.message}`, 'ERROR');
-      throw error;
-    }
-  } else {
-    log(`Using configured blockHeight: ${config.blockHeight}`, 'INFO');
-  }
-}
 
 // run indexer
 async function runIndexer() {

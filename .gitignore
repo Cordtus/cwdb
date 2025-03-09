@@ -13,8 +13,8 @@ node_modules/
 
 # Environment files
 .env
-config.js
 
 # Other system files
 .DS_Store
 Thumbs.db
+config.js
