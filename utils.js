@@ -48,11 +48,10 @@ export function log(message, level = 'INFO') {
 }
 
 export async function initializeBlockHeight() {
-  if (config.blockHeight == null) {
+  if (!config.blockHeight || config.blockHeight === "") {  // check for falsy/empty
     try {
-      const response = await axios.get("https://rpc.sei.basementnodes.ca/block");
-      // Parse the block height from the response and assign it to config
-      config.blockHeight = parseInt(response.data.block.header.height, 10);
+      const response = await fetchData("https://rpc.sei.basementnodes.ca/block");
+      config.blockHeight = parseInt(response.block.header.height, 10);
       log(`Block height not specified. Using fetched blockHeight: ${config.blockHeight}`, 'INFO');
     } catch (error) {
       log(`Failed to fetch block height: ${error.message}`, 'ERROR');

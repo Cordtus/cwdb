@@ -12,7 +12,6 @@ import { log, db, fetchData, initializeBlockHeight } from './utils.js';
 import { config } from './config.js';
 import { initializeDatabase } from './initDb.js';
 import fs from 'fs';
-import axios from 'axios';
 
 // Ensure data and logs directories exist
 if (!fs.existsSync('./data')) fs.mkdirSync('./data');
@@ -30,7 +29,8 @@ async function fetchCodeIdForContract(contractAddress) {
 
 async function seedContracts() {
   const contracts = [
-    "sei1fnett9fpkdn9u6uufpdypsxeatd75y0r30nayqaaj9kx5jssrzhq9d2zvx"
+    "sei1g2a0q3tddzs7vf7lk45c2tgufsaqerxmsdr2cprth3mjtuqxm60qdmravc",
+    "sei1v90ly54qeu7497lzk2mnmp2h29sgtep8hs5ryvfqf8dwq5gc0t9srp6aey"
   ];
 
   try {

@@ -20,7 +20,6 @@ import {
 import { config } from './config.js';
 import { initializeDatabase } from './initDb.js';
 import fs from 'fs';
-import axios from 'axios';
 
 // Ensure data and logs directories exist
 if (!fs.existsSync('./data')) fs.mkdirSync('./data');

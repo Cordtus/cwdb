@@ -236,8 +236,6 @@ export async function fetchContractHistory(restAddress) {
   }
 }
 
-/// Fetch and store metadata for each contract address in concurrent batches
-
 export async function fetchContractMetadata(restAddress) {
   const batchSize = 50;
   const delayBetweenBatches = 50;
@@ -280,31 +278,43 @@ export async function fetchContractMetadata(restAddress) {
             const { code_id, creator, admin, label } = response.data.contract_info;
             let contractType = null;
 
-            // Try to determine contract type from label
+            // 1) Attempt to detect from label
             if (label) {
               const labelLower = label.toLowerCase();
-              if (labelLower.includes('cw721')) contractType = 'cw721_base';
-              else if (labelLower.includes('cw20')) contractType = 'cw20_base';
-              else if (labelLower.includes('cw1155')) contractType = 'cw1155';
-              else if (labelLower.includes('cw404')) contractType = 'cw404';
+              if (labelLower.includes('cw721')) {
+                contractType = 'cw721';
+              } else if (labelLower.includes('cw20')) {
+                contractType = 'cw20';
+              } else if (labelLower.includes('cw1155')) {
+                contractType = 'cw1155';
+              } else if (labelLower.includes('cw404')) {
+                contractType = 'cw404';
+              }
             }
 
-            // If no type found from label, try fetching contract info
+            // 2) If no type found from label, try to fetch `contract_info` query
             if (!contractType) {
               try {
-                const infoResponse = await sendContractQuery(restAddress, contractAddress, { contract_info: {} }, false, false);
+                const infoResponse = await sendContractQuery(
+                  restAddress,
+                  contractAddress,
+                  { contract_info: {} },
+                  false,
+                  false
+                );
+                // If it has a `symbol` in the contract_info, assume `cw20`
                 if (infoResponse?.data?.data?.symbol) {
-                  // Most likely a CW20 if it has a symbol
-                  contractType = 'cw20_base';
+                  contractType = 'cw20';
                 }
               } catch (error) {
-                // If this fails, we'll determine type in identifyContractTypes function
+                // We'll let identifyContractTypes handle it if this fails
                 log(`Could not determine type from contract_info for ${contractAddress}`, 'DEBUG');
               }
             }
 
-            // If we found a type, update all contracts with the same code_id
+            // 3) Update the DB
             if (contractType && codeIdMap.has(code_id)) {
+              // Update all contracts with the same code_id
               const relatedContracts = Array.from(codeIdMap.get(code_id));
               const batchData = relatedContracts.map(addr => [addr, code_id, creator, admin, label, contractType]);
               await batchInsertOrUpdate(
@@ -315,7 +325,7 @@ export async function fetchContractMetadata(restAddress) {
               );
               log(`Updated type ${contractType} for all contracts with code_id ${code_id}`, 'DEBUG');
             } else {
-              // Update single contract without type
+              // If no recognized type, store partial data and let identifyContractTypes fill in
               await batchInsertOrUpdate(
                 'contracts',
                 ['address', 'code_id', 'creator', 'admin', 'label'],
@@ -354,88 +364,110 @@ export async function fetchContractMetadata(restAddress) {
   }
 }
 
-// Identify contract types concurrently with batch inserts and progress logging
+// Identify contract "type"
 export async function identifyContractTypes(restAddress) {
   try {
-    const contracts = db.prepare('SELECT address FROM contracts').all().map(row => row.address);
+    // We might only want to process contracts that are missing or "unknown"
+    const contracts = db.prepare(`
+      SELECT address
+      FROM contracts
+      WHERE type IS NULL OR type = '' OR type = 'unknown'
+    `).all().map(row => row.address);
+
+    if (!contracts.length) {
+      log('No contracts need type identification.', 'INFO');
+      return;
+    }
+
     const progress = checkProgress('identifyContractTypes');
-    const startIndex = progress.last_processed ? contracts.indexOf(progress.last_processed) + 1 : 0;
+    const startIndex = progress.last_processed
+      ? contracts.indexOf(progress.last_processed) + 1
+      : 0;
 
     const batchSize = 50;
     let batchData = [];
     let processedCount = 0;
     let batchProgressUpdates = [];
-
     const limit = pLimit(config.concurrencyLimit);
 
-    const typePromises = contracts.slice(startIndex).map((contractAddress, index) => limit(async () => {
-      let contractType;
-      const testPayload = { "a": "b" }; // Intentionally incorrect payload to trigger an error response
+    const typePromises = contracts.slice(startIndex).map(contractAddress =>
+      limit(async () => {
+        let contractType = null;
+        const testPayload = { "a": "b" }; // Intentionally incorrect to trigger error
 
-      try {
-        // No need to construct or pass headers here
-        const response = await sendContractQuery(restAddress, contractAddress, testPayload, false, true);
+        try {
+          const response = await sendContractQuery(restAddress, contractAddress, testPayload, false, true);
+          if (response?.message) {
+            log(`Debug: Full error message for ${contractAddress}: ${response.message}`, 'DEBUG');
+            // Example: "Error parsing into type cw721_base::Msg: ..."
 
-        // Log the entire response message for debugging purposes
-        if (response?.message) {
-          log(`Debug: Full error message for ${contractAddress}: ${response.message}`, 'DEBUG');
-
-          
-          // Attempt to extract the contract type from the error message, if available
-          const match = response.message.match(/Error parsing into type ([\w]+)::/);
-          if (match) {
-            contractType = match[1];
-            log(`Identified contract type for ${contractAddress}: ${contractType}`, 'INFO');
+            const match = response.message.match(/Error parsing into type (.+?):/);
+            if (match) {
+              const extractedType = match[1].toLowerCase();
+              // Use known types
+              const knownTypes = ['cw721', 'cw20', 'cw404', 'cw1155'];
+              const found = knownTypes.find(t => extractedType.includes(t));
+              if (found) {
+                contractType = found;  // e.g. "cw721"
+                log(`Identified contract type for ${contractAddress}: ${contractType}`, 'INFO');
+              } else {
+                log(`Extracted type "${extractedType}" not recognized for ${contractAddress}`, 'INFO');
+              }
+            } else {
+              log(`No recognizable type in error message for contract ${contractAddress}`, 'INFO');
+            }
           } else {
-            log(`No recognizable type in error message for contract ${contractAddress}`, 'INFO');
+            log(`No 'message' field in response for contract ${contractAddress}`, 'DEBUG');
           }
-        } else {
-          log(`No 'message' field in response for contract ${contractAddress}`, 'DEBUG');
+        } catch (error) {
+          // If there's an error with status != 400, log it
+          if (error?.response?.status !== 400) {
+            log(`Error determining contract type for ${contractAddress}: ${error.message}`, 'ERROR');
+          }
+          // Optionally, parse error.response?.data?.message if you want
         }
 
-        contractType = contractType || 'unknown';
-        log(`Processed contract ${contractAddress} with type ${contractType}`, 'DEBUG');
-      } catch (error) {
-        // Log any unexpected errors that aren't related to type parsing
-        if (error?.response?.status !== 400) {
-          log(`Error determining contract type for ${contractAddress}: ${error.message}`, 'ERROR');
+        // If a known type was found, update it. Otherwise, do not overwrite.
+        if (contractType) {
+          batchData.push([contractAddress, contractType]);
         }
-        contractType = 'unknown';
-      }
+        processedCount++;
 
-      batchData.push([contractAddress, contractType]);
-      processedCount++;
+        if (batchData.length >= batchSize) {
+          await batchInsertOrUpdate('contracts', ['address', 'type'], batchData, 'address');
+          batchData = [];
+          batchProgressUpdates.push({
+            step: 'identifyContractTypes',
+            completed: 0,
+            lastProcessed: contractAddress
+          });
+        }
 
-      if (batchData.length >= batchSize) {
-        await batchInsertOrUpdate('contracts', ['address', 'type'], batchData, 'address');
-        batchData = [];
-        batchProgressUpdates.push({ step: 'identifyContractTypes', completed: 0, lastProcessed: contractAddress });
-      }
-
-      if (processedCount % 100 === 0 || processedCount === contracts.length) {
-        log(`Progress: Processed ${processedCount} / ${contracts.length} contracts`, 'INFO');
-      }
-    }));
+        if (processedCount % 100 === 0 || processedCount === contracts.length) {
+          log(`Progress: Processed ${processedCount} / ${contracts.length} contracts`, 'INFO');
+        }
+      })
+    );
 
     await Promise.allSettled(typePromises);
 
-    // Insert remaining contracts if any are left in the batch
+    // Insert remaining updates
     if (batchData.length > 0) {
       await batchInsertOrUpdate('contracts', ['address', 'type'], batchData, 'address');
       log(`Final batch inserted contract types for ${batchData.length} contracts`, 'DEBUG');
     }
 
-    // Batch update progress
+    // Mark progress
     batchProgressUpdates.push({ step: 'identifyContractTypes', completed: 1 });
     batchProgressUpdates.forEach(update => updateProgress(update.step, update.completed, update.lastProcessed));
-    log(`Finished identifying contract types for all contracts.`, 'INFO');
+    log('Finished identifying contract types for all contracts.', 'INFO');
   } catch (error) {
     log(`Error in identifyContractTypes: ${error.message}`, 'ERROR');
     throw error;
   }
 }
 
-// Fetch tokens and their owners for relevant contracts
+// Fetch tokens and holders
 
 export async function fetchTokensAndOwners(restAddress) {
   const delayBetweenBatches = 100;
@@ -444,7 +476,7 @@ export async function fetchTokensAndOwners(restAddress) {
 
   try {
     const progress = checkProgress('fetchTokensAndOwners');
-    const contracts = db.prepare("SELECT address, type FROM contracts WHERE type IN ('cw721_base', 'cw1155', 'cw404', 'cw20_base')").all();
+    const contracts = db.prepare("SELECT address, type FROM contracts WHERE type IN ('cw721', 'cw1155', 'cw404', 'cw20_base')").all();
     const startIndex = progress.last_processed ? contracts.findIndex(contract => contract.address === progress.last_processed) + 1 : 0;
     let batchProgressUpdates = [];
 
@@ -516,7 +548,7 @@ export async function fetchTokensAndOwners(restAddress) {
         continue;
       }
 
-      // Process other contract types (cw1155, cw721_base, etc.)
+      // Process other contract types (cw1155, cw721, etc.)
       while (true) {
         const tokenQueryPayload = { all_tokens: { limit: config.paginationLimit, ...(lastTokenFetched && { start_after: lastTokenFetched }) } };
         const response = await sendContractQuery(restAddress, contractAddress, tokenQueryPayload, false, false);
