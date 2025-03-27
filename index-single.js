@@ -7,10 +7,11 @@ import {
   fetchTokensAndOwners, 
   fetchPointerData, 
   fetchAssociatedWallets, 
-} from './contractHelper.js';
-import { log, db, fetchData, initializeBlockHeight } from './utils.js';
+} from './contractCaller.js';
+import { log, db, fetchDataGrpc, initializeBlockHeight } from './utils.js';
 import { config } from './config.js';
 import { initializeDatabase } from './initDb.js';
+import { grpcClient } from './grpcClient.js';
 import fs from 'fs';
 
 // Ensure data and logs directories exist
@@ -18,19 +19,25 @@ if (!fs.existsSync('./data')) fs.mkdirSync('./data');
 if (!fs.existsSync('./logs')) fs.mkdirSync('./logs');
 
 async function fetchCodeIdForContract(contractAddress) {
-  const url = `${config.restAddress}/cosmwasm/wasm/v1/contract/${contractAddress}`;
-  const response = await fetchData(url);
-  
-  if (!response?.contract_info?.code_id) {
-    throw new Error(`Failed to fetch code_id for contract ${contractAddress}`);
+  try {
+    const payload = { address: contractAddress };
+    const response = await grpcClient["cosmwasm.wasm.v1.Query"].ContractInfo(payload);
+    
+    if (!response?.contract_info?.code_id) {
+      throw new Error(`Failed to fetch code_id for contract ${contractAddress}`);
+    }
+    return response.contract_info.code_id;
+  } catch (error) {
+    log(`Error fetching code_id via gRPC: ${error.message}`, 'ERROR');
+    throw error;
   }
-  return response.contract_info.code_id;
 }
 
 async function seedContracts() {
+  // Example contract addresses - replace with actual addresses for your target chain
   const contracts = [
-    "sei1g2a0q3tddzs7vf7lk45c2tgufsaqerxmsdr2cprth3mjtuqxm60qdmravc",
-    "sei1v90ly54qeu7497lzk2mnmp2h29sgtep8hs5ryvfqf8dwq5gc0t9srp6aey"
+    "cosmos1g2a0q3tddzs7vf7lk45c2tgufsaqerxmsdr2cprth3mjtuqxm60qdmravc",
+    "cosmos1v90ly54qeu7497lzk2mnmp2h29sgtep8hs5ryvfqf8dwq5gc0t9srp6aey"
   ];
 
   try {
@@ -67,15 +74,13 @@ async function seedContracts() {
 async function runTestIndexer() {
   try {
     await initializeBlockHeight();
-    log('Test Indexer started', 'INFO');
+    log('CosmWasm Test Indexer started', 'INFO');
     
     const steps = [
-      { name: 'fetchContractMetadata', action: () => fetchContractMetadata(config.restAddress) },
-      { name: 'fetchContractHistory', action: () => fetchContractHistory(config.restAddress) },
-      { name: 'identifyContractTypes', action: () => identifyContractTypes(config.restAddress) },
-      { name: 'fetchTokensAndOwners', action: () => fetchTokensAndOwners(config.restAddress) },
-      { name: 'fetchPointerData', action: () => fetchPointerData(config.pointerApi) },
-      { name: 'fetchAssociatedWallets', action: () => fetchAssociatedWallets(config.evmRpcAddress) }
+      { name: 'fetchContractMetadata', action: () => fetchContractMetadata() },
+      { name: 'fetchContractHistory', action: () => fetchContractHistory() },
+      { name: 'identifyContractTypes', action: () => identifyContractTypes() },
+      { name: 'fetchTokensAndOwners', action: () => fetchTokensAndOwners() }
     ];
 
     for (const step of steps) {

@@ -1,9 +1,9 @@
-// contractHelper.js
+// contractCaller.js
 
 import { 
-  fetchPaginatedData,
-  fetchData,
-  sendContractQuery, 
+  fetchPaginatedDataGrpc,
+  fetchDataGrpc,
+  sendContractQueryGrpc, 
   retryOperation, 
   log,
   batchInsertOrUpdate,
@@ -14,9 +14,10 @@ import {
 import axios from 'axios';
 import pLimit from 'p-limit';
 import { config } from './config.js';
+import { grpcClient } from './grpcClient.js';
 
 // fetch all code IDs
-export async function fetchCodeIds(restAddress) {
+export async function fetchCodeIds() {
   try {
     const progress = checkProgress('fetchCodeIds');
     if (progress.completed) {
@@ -30,25 +31,22 @@ export async function fetchCodeIds(restAddress) {
     let batchProgressUpdates = [];
 
     while (true) {
-      const response = await fetchPaginatedData(
-        `${restAddress}/cosmwasm/wasm/v1/code`,
-        'code_infos',
-        {
+      const payload = {
+        pagination: {
           limit: config.paginationLimit,
-          nextKey,
-          retries: config.retryConfig.retries,
-          delay: config.retryConfig.delay,
-          backoffFactor: config.retryConfig.backoffFactor,
+          ...(nextKey && { key: nextKey })
         }
-      );
+      };
 
-      if (!Array.isArray(response) || response.length === 0) {
+      const response = await grpcClient["cosmwasm.wasm.v1.Query"].Codes(payload);
+
+      if (!response.code_infos || response.code_infos.length === 0) {
         log('All code IDs recorded; no additional data found.', 'INFO');
         break;
       }
 
-      const batchData = response.map(({ code_id, creator, instantiate_permission }) => 
-        [code_id, creator, JSON.stringify(instantiate_permission)]
+      const batchData = response.code_infos.map(info => 
+        [info.code_id, info.creator, JSON.stringify(info.instantiate_permission)]
       );
 
       // Batch insert and log each processed batch
@@ -70,7 +68,7 @@ export async function fetchCodeIds(restAddress) {
       }
 
       if (batchCount === 1 || batchCount % 20 === 0) {
-        batchProgressUpdates.push({ step: 'fetchCodeIds', completed: 0, lastProcessed: response[response.length - 1].code_id });
+        batchProgressUpdates.push({ step: 'fetchCodeIds', completed: 0, lastProcessed: response.code_infos[response.code_infos.length - 1].code_id });
       }
     }
 
@@ -91,7 +89,7 @@ export async function fetchCodeIds(restAddress) {
 }
 
 // fetchContractAddressesByCodeId with unified progress tracking identifier
-export async function fetchContractAddressesByCodeId(restAddress) {
+export async function fetchContractAddressesByCodeId() {
   try {
     const progress = checkProgress('fetchContractsByCode');  // Unified identifier
     if (progress.completed) {
@@ -113,25 +111,27 @@ export async function fetchContractAddressesByCodeId(restAddress) {
       let page = 1;
 
       while (true) {
-        const paginatedUrl = `${restAddress}/cosmwasm/wasm/v1/code/${code_id}/contracts${nextKey ? `?pagination.key=${encodeURIComponent(nextKey)}` : ''}`;
+        const payload = {
+          code_id: code_id,
+          pagination: {
+            limit: config.paginationLimit,
+            ...(nextKey && { key: nextKey })
+          }
+        };
+
         log(`Fetching data for code_id ${code_id}, page ${page}`, 'DEBUG');
 
-        const response = await fetchPaginatedData(paginatedUrl, 'contracts', {
-          limit: config.paginationLimit,
-          retries: config.retryConfig.retries,
-          delay: config.retryConfig.delay,
-          backoffFactor: config.retryConfig.backoffFactor,
-        });
+        const response = await grpcClient["cosmwasm.wasm.v1.Query"].ContractsByCode(payload);
 
-        if (response.length > 0) {
-          allContracts.push(...response);
-          log(`Fetched ${response.length} items for code_id ${code_id} on page ${page}`, 'DEBUG');
+        if (response.contracts && response.contracts.length > 0) {
+          allContracts.push(...response.contracts);
+          log(`Fetched ${response.contracts.length} items for code_id ${code_id} on page ${page}`, 'DEBUG');
         } else {
           log(`No more contracts found for code_id ${code_id} on page ${page}`, 'INFO');
           break;
         }
 
-        if (response.length < config.paginationLimit) break;
+        if (response.contracts.length < config.paginationLimit) break;
         nextKey = response.pagination?.next_key || null;
         if (!nextKey) break;
         page += 1;
@@ -164,7 +164,7 @@ export async function fetchContractAddressesByCodeId(restAddress) {
 }
 
 // Fetch contract history for each contract address concurrently
-export async function fetchContractHistory(restAddress) {
+export async function fetchContractHistory() {
   try {
     const contracts = db.prepare('SELECT address FROM contracts').all().map(row => row.address);
     const limit = pLimit(config.concurrencyLimit);
@@ -175,31 +175,29 @@ export async function fetchContractHistory(restAddress) {
       let nextKey = null;
 
       while (true) {
-        // Correct history endpoint
-        const requestUrl = `${restAddress}/cosmwasm/wasm/v1/contract/${contractAddress}/history${nextKey ? `?pagination.key=${encodeURIComponent(nextKey)}` : ''}`;
+        const payload = {
+          address: contractAddress,
+          pagination: {
+            limit: config.paginationLimit,
+            ...(nextKey && { key: nextKey })
+          }
+        };
 
         try {
-          const response = await axios.get(requestUrl);
+          const response = await grpcClient["cosmwasm.wasm.v1.Query"].ContractHistory(payload);
 
-          if (response.status !== 200 || !response.data.entries) {
-            log(`No valid history entries for ${contractAddress}.`, 'ERROR');
-            break;
-          }
-
-          const { entries, pagination } = response.data;
-
-          if (!Array.isArray(entries) || entries.length === 0) {
+          if (!response.entries || response.entries.length === 0) {
             log(`No history entries found for ${contractAddress}`, 'INFO');
             break;
           }
 
           // Insert history entries into the database
-          const insertData = entries.map(entry => [
+          const insertData = response.entries.map(entry => [
             contractAddress,
             entry.operation || '',
             entry.code_id || '',
-            entry.updated || '',
-            JSON.stringify(entry.msg).replace(/"/g, '""').replace(/\\/g, '\\\\'),
+            entry.updated?.block?.height || '',
+            JSON.stringify(entry.msg || {}).replace(/"/g, '""').replace(/\\/g, '\\\\'),
           ]);
 
           await batchInsertOrUpdate(
@@ -209,10 +207,10 @@ export async function fetchContractHistory(restAddress) {
             ['contract_address', 'operation', 'code_id'] // Correct ON CONFLICT to use composite key
           );
 
-          log(`Inserted ${entries.length} history entries for ${contractAddress}`, 'DEBUG');
+          log(`Inserted ${response.entries.length} history entries for ${contractAddress}`, 'DEBUG');
 
           // Update the nextKey for pagination
-          nextKey = pagination?.next_key || null;
+          nextKey = response.pagination?.next_key || null;
           if (!nextKey) break;
 
         } catch (error) {
@@ -236,7 +234,7 @@ export async function fetchContractHistory(restAddress) {
   }
 }
 
-export async function fetchContractMetadata(restAddress) {
+export async function fetchContractMetadata() {
   const batchSize = 50;
   const delayBetweenBatches = 50;
 
@@ -270,12 +268,12 @@ export async function fetchContractMetadata(restAddress) {
 
       const fetchPromises = batch.map(contractAddress => limit(async () => {
         try {
-          // Fetch basic contract info
-          const requestUrl = `${restAddress}/cosmwasm/wasm/v1/contract/${contractAddress}`;
-          const response = await axios.get(requestUrl);
+          // Fetch basic contract info using gRPC
+          const payload = { address: contractAddress };
+          const response = await grpcClient["cosmwasm.wasm.v1.Query"].ContractInfo(payload);
 
-          if (response?.data?.contract_info) {
-            const { code_id, creator, admin, label } = response.data.contract_info;
+          if (response?.contract_info) {
+            const { code_id, creator, admin, label } = response.contract_info;
             let contractType = null;
 
             // 1) Attempt to detect from label
@@ -295,11 +293,9 @@ export async function fetchContractMetadata(restAddress) {
             // 2) If no type found from label, try to fetch `contract_info` query
             if (!contractType) {
               try {
-                const infoResponse = await sendContractQuery(
-                  restAddress,
+                const infoResponse = await sendContractQueryGrpc(
                   contractAddress,
                   { contract_info: {} },
-                  false,
                   false
                 );
                 // If it has a `symbol` in the contract_info, assume `cw20`
@@ -333,7 +329,7 @@ export async function fetchContractMetadata(restAddress) {
                 'address'
               );
             }
-
+            
             return true;
           }
         } catch (error) {
@@ -364,8 +360,8 @@ export async function fetchContractMetadata(restAddress) {
   }
 }
 
-// Identify contract "type"
-export async function identifyContractTypes(restAddress) {
+// Identify contract "type" using gRPC
+export async function identifyContractTypes() {
   try {
     // We might only want to process contracts that are missing or "unknown"
     const contracts = db.prepare(`
@@ -396,7 +392,7 @@ export async function identifyContractTypes(restAddress) {
         const testPayload = { "a": "b" }; // Intentionally incorrect to trigger error
 
         try {
-          const response = await sendContractQuery(restAddress, contractAddress, testPayload, false, true);
+          const response = await sendContractQueryGrpc(contractAddress, testPayload, true);
           if (response?.message) {
             log(`Debug: Full error message for ${contractAddress}: ${response.message}`, 'DEBUG');
             // Example: "Error parsing into type cw721_base::Msg: ..."
@@ -468,8 +464,7 @@ export async function identifyContractTypes(restAddress) {
 }
 
 // Fetch tokens and holders
-
-export async function fetchTokensAndOwners(restAddress) {
+export async function fetchTokensAndOwners() {
   const delayBetweenBatches = 100;
   const concurrencyLimit = config.concurrencyLimit || 5;
   const limit = pLimit(concurrencyLimit);
@@ -490,7 +485,7 @@ export async function fetchTokensAndOwners(restAddress) {
 
       if (contractType === 'cw20_base') {
         // Handle cw20 contract type
-        const tokenInfoResponse = await sendContractQuery(restAddress, contractAddress, { token_info: {} }, false, false);
+        const tokenInfoResponse = await sendContractQueryGrpc(contractAddress, { token_info: {} }, false);
         log(`Token info response for ${contractAddress}: ${JSON.stringify(tokenInfoResponse)}`, 'DEBUG');
 
         const totalSupply = tokenInfoResponse?.data?.data?.total_supply;
@@ -509,7 +504,7 @@ export async function fetchTokensAndOwners(restAddress) {
 
         do {
           const accountsQueryPayload = { all_accounts: { limit: config.paginationLimit, ...(paginationKey && { start_after: paginationKey }) } };
-          const accountsResponse = await sendContractQuery(restAddress, contractAddress, accountsQueryPayload, false, false);
+          const accountsResponse = await sendContractQueryGrpc(contractAddress, accountsQueryPayload, false);
           log(`Accounts response for ${contractAddress}: ${JSON.stringify(accountsResponse)}`, 'DEBUG');
 
           const accounts = accountsResponse?.data?.data?.accounts || [];
@@ -524,7 +519,7 @@ export async function fetchTokensAndOwners(restAddress) {
 
         const cw20OwnershipPromises = allAccounts.map(account => limit(async () => {
           const balanceQueryPayload = { balance: { address: account } };
-          const balanceResponse = await sendContractQuery(restAddress, contractAddress, balanceQueryPayload, false, false);
+          const balanceResponse = await sendContractQueryGrpc(contractAddress, balanceQueryPayload, false);
           log(`Balance response for account ${account} in ${contractAddress}: ${JSON.stringify(balanceResponse)}`, 'DEBUG');
 
           const balance = balanceResponse?.data?.data?.balance;
@@ -551,7 +546,7 @@ export async function fetchTokensAndOwners(restAddress) {
       // Process other contract types (cw1155, cw721, etc.)
       while (true) {
         const tokenQueryPayload = { all_tokens: { limit: config.paginationLimit, ...(lastTokenFetched && { start_after: lastTokenFetched }) } };
-        const response = await sendContractQuery(restAddress, contractAddress, tokenQueryPayload, false, false);
+        const response = await sendContractQueryGrpc(contractAddress, tokenQueryPayload, false);
         log(`Token response for ${contractAddress}: ${JSON.stringify(response)}`, 'DEBUG');
 
         const tokenIds = response?.data?.data?.tokens || [];
@@ -580,7 +575,7 @@ export async function fetchTokensAndOwners(restAddress) {
         const tokenPromises = allTokens.map(tokenId => limit(async () => {
           try {
             const nftInfoPayload = { all_nft_info: { token_id: tokenId } };
-            const nftInfoResponse = await sendContractQuery(restAddress, contractAddress, nftInfoPayload, false, false);
+            const nftInfoResponse = await sendContractQueryGrpc(contractAddress, nftInfoPayload, false);
             
             if (nftInfoResponse?.data?.data) {
               const { access, info } = nftInfoResponse.data.data;
@@ -626,133 +621,6 @@ export async function fetchTokensAndOwners(restAddress) {
     log('Finished processing tokens and ownership for all contracts.', 'INFO');
   } catch (error) {
     log(`Error in fetchTokensAndOwners: ${error.message}`, 'ERROR');
-    throw error;
-  }
-}
-
-// Fetch pointer data and store it in the database
-export async function fetchPointerData(pointerApi) {
-  const chunkSize = config.chunkSize || 25; // Default to 25 if not defined
-
-  // Retrieve all addresses from the contracts table and split them into an array
-  const addressResult = db.prepare('SELECT address FROM contracts').all();
-  const contractAddresses = addressResult.map(row => row.address);
-
-  // Check if contractAddresses array is valid
-  if (contractAddresses.length === 0) {
-    log(`Error: No contract addresses found in the database`, 'ERROR');
-    return; // Exit function if no addresses are found
-  }
-
-  // Insert contract addresses into the pointer_data table if not already present
-  await db.transaction(() => {
-    const insertQuery = db.prepare(`
-      INSERT OR IGNORE INTO pointer_data (contract_address) VALUES (?)`);
-    contractAddresses.forEach(address => insertQuery.run(address));
-  })();
-
-  // Process the addresses in chunks and send requests to pointerApi
-  for (let i = 0; i < contractAddresses.length; i += chunkSize) {
-    const chunk = contractAddresses.slice(i, i + chunkSize); // Prepare a chunk of addresses
-    const payload = { addresses: chunk }; // Payload with addresses array
-
-    try {
-      // Send the batch request to the pointer API with retry logic
-      const response = await retryOperation(() => axios.post(pointerApi, payload));
-
-      if (response && response.status === 200 && Array.isArray(response.data)) {
-        // Parse the response for each address and prepare data for insertion
-        const batchData = response.data.map(({ address, pointerAddress, pointeeAddress, isBaseAsset, isPointer, pointerType }) => [
-          address,
-          pointerAddress || null,
-          pointeeAddress || null,
-          isBaseAsset ? 1 : 0,
-          isPointer ? 1 : 0,
-          pointerType || null
-        ]);
-
-        // Insert or update batch data in the pointer_data table
-        await batchInsertOrUpdate(
-          'pointer_data',
-          ['contract_address', 'pointer_address', 'pointee_address', 'is_base_asset', 'is_pointer', 'pointer_type'],
-          batchData,
-          'contract_address'
-        );
-        log(`Stored pointer data for ${batchData.length} addresses`, 'DEBUG');
-      } else {
-        log(`Unexpected or empty data while fetching pointer data. Status: ${response ? response.status : 'No response'}`, 'ERROR');
-      }
-    } catch (error) {
-      log(`Error processing pointer data chunk: ${error.message}`, 'ERROR');
-    }
-  }
-  log('Finished fetching pointer data for all addresses.', 'INFO');
-}
-
-export async function fetchAssociatedWallets(evmRpcAddress, concurrencyLimit = 5) {
-  try {
-    log('Starting fetchAssociatedWallets function...', 'INFO');
-
-    const owners = db.prepare(`
-      SELECT DISTINCT owner 
-      FROM nft_owners
-      WHERE owner NOT IN (SELECT wallet_address FROM wallet_associations)
-      ORDER BY owner ASC
-    `).all();
-
-    if (owners.length === 0) {
-      log('No unprocessed owners found in nft_owners table.', 'INFO');
-      return;
-    }
-
-    log(`Found ${owners.length} unique owners to process`, 'INFO');
-
-    // Process in batches of 100
-    const batchSize = 100;
-    for (let i = 0; i < owners.length; i += batchSize) {
-      const batch = owners.slice(i, i + batchSize).map(row => row.owner);
-      log(`Processing batch ${Math.floor(i / batchSize) + 1} of ${Math.ceil(owners.length / batchSize)}`, 'INFO');
-
-      try {
-        // Note: fetchData expects query params in URL for GET, but this is a POST
-        // So we pass a config object as second parameter
-        const response = await fetchData('https://wallets.sei.basementnodes.ca/query-address', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          data: { addresses: batch }
-        });
-
-        if (Array.isArray(response)) {
-          // Zip owners with their associated addresses
-          const associations = batch.map((owner, index) => {
-            const associated = response[index];
-            if (associated && owner !== associated) {
-              return [owner, associated];
-            }
-            return null;
-          }).filter(Boolean);
-
-          if (associations.length > 0) {
-            await batchInsertOrUpdate(
-              'wallet_associations',
-              ['wallet_address', 'evm_address'],
-              associations,
-              'wallet_address'
-            );
-            log(`Stored ${associations.length} wallet associations from batch of ${batch.length}`, 'INFO');
-          }
-        }
-      } catch (error) {
-        log(`Error processing batch: ${error.message}`, 'ERROR');
-        continue;
-      }
-
-      await new Promise(resolve => setTimeout(resolve, 100));
-    }
-
-    log('Finished processing all associated wallets.', 'INFO');
-  } catch (error) {
-    log(`Critical error in fetchAssociatedWallets: ${error.message}`, 'ERROR');
     throw error;
   }
 }

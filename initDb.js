@@ -51,18 +51,6 @@ export function initializeDatabase(isTest = false) {
       owner TEXT,
       contract_type TEXT,
       PRIMARY KEY (collection_address, token_id, owner)
-    )`,
-    `CREATE TABLE IF NOT EXISTS pointer_data (
-      contract_address TEXT PRIMARY KEY,
-      pointer_address TEXT,
-      pointee_address TEXT,
-      is_base_asset INTEGER,
-      is_pointer INTEGER,
-      pointer_type TEXT
-    )`,
-    `CREATE TABLE IF NOT EXISTS wallet_associations (
-      wallet_address TEXT PRIMARY KEY,
-      evm_address TEXT
     )`
   ];
 
@@ -72,9 +60,7 @@ export function initializeDatabase(isTest = false) {
     'fetchContractMetadata',
     'fetchContractHistory',
     'identifyContractTypes',
-    'fetchTokensAndOwners',
-    'fetchPointerData',
-    'fetchAssociatedWallets'
+    'fetchTokensAndOwners'
   ];
 
   try {

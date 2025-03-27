@@ -9,7 +9,7 @@ import {
   fetchTokensAndOwners,
   fetchPointerData,
   fetchAssociatedWallets 
-} from './contractHelper.js';
+} from './contractCaller.js';
 import { 
   createWebSocketConnection,
   log,
@@ -30,19 +30,17 @@ async function runIndexer() {
   try {
     await initializeBlockHeight();
 
-    log(`Indexer started with log level: ${config.logLevel}`, 'INFO');
+    log(`CosmWasm gRPC Indexer started with log level: ${config.logLevel}`, 'INFO');
     initializeDatabase();
     log('Database initialized successfully.', 'INFO');
 
     const steps = [
-      { name: 'fetchCodeIds', action: () => fetchCodeIds(config.restAddress) },
-      { name: 'fetchContractsByCode', action: () => fetchContractAddressesByCodeId(config.restAddress) },
-      { name: 'fetchContractMetadata', action: () => fetchContractMetadata(config.restAddress) },
-      { name: 'fetchContractHistory', action: () => fetchContractHistory(config.restAddress) },
-      { name: 'identifyContractTypes', action: () => identifyContractTypes(config.restAddress) },
-      { name: 'fetchTokensAndOwners', action: () => fetchTokensAndOwners(config.restAddress) },
-      { name: 'fetchPointerData', action: () => fetchPointerData(config.pointerApi) },
-      { name: 'fetchAssociatedWallets', action: () => fetchAssociatedWallets(config.evmRpcAddress) }
+      { name: 'fetchCodeIds', action: () => fetchCodeIds() },
+      { name: 'fetchContractsByCode', action: () => fetchContractAddressesByCodeId() },
+      { name: 'fetchContractMetadata', action: () => fetchContractMetadata() },
+      { name: 'fetchContractHistory', action: () => fetchContractHistory() },
+      { name: 'identifyContractTypes', action: () => identifyContractTypes() },
+      { name: 'fetchTokensAndOwners', action: () => fetchTokensAndOwners() }
     ];
 
     let allStepsCompleted = true;

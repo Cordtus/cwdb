@@ -6,6 +6,7 @@ import { fileURLToPath } from 'url';
 import Database from 'better-sqlite3';
 import { config } from './config.js';
 import { WebSocket } from 'ws';
+import { grpcClient } from './grpcClient.js';
 
 // ES module-compatible __dirname
 const __filename = fileURLToPath(import.meta.url);
@@ -50,7 +51,8 @@ export function log(message, level = 'INFO') {
 export async function initializeBlockHeight() {
   if (!config.blockHeight || config.blockHeight === "") {  // check for falsy/empty
     try {
-      const response = await fetchData("https://rpc.sei.basementnodes.ca/block");
+      // Using gRPC instead of REST for block height
+      const response = await fetchDataGrpc("latest_block", {});
       config.blockHeight = parseInt(response.block.header.height, 10);
       log(`Block height not specified. Using fetched blockHeight: ${config.blockHeight}`, 'INFO');
     } catch (error) {
@@ -79,112 +81,213 @@ export async function retryOperation(operation, retries = 3, delay = 1000, backo
 }
 
 /**
- * Sends a smart contract query to the REST endpoint.
- * Handles encoding the payload in base64 format and accepts an optional POST request.
+ * Sends a smart contract query to the gRPC endpoint.
  * 
- * @param {string} restAddress - The REST API address.
  * @param {string} contractAddress - The contract address to query.
- * @param {Object} payload - The query payload that will be base64 encoded.
- * @param {boolean} usePost - If true, sends the query using a POST request; otherwise, uses GET. Defaults to false.
- * @param {boolean} skip400ErrorLog - If true, completely ignores 400 status errors, used only in identifyContractTypes.
- * @param {Object} [headers={}] - Optional headers to include in the request.
+ * @param {Object} payload - The query payload.
+ * @param {boolean} skip400ErrorLog - If true, completely ignores 400 status errors.
  * @returns {Object} - The parsed response from the contract query, or an error object if the request failed.
  */
-export async function sendContractQuery(restAddress, contractAddress, payload, usePost = false, skip400ErrorLog = false) {
-  const encodedPayload = Buffer.from(JSON.stringify(payload)).toString('base64');
-  const requestUrl = `${restAddress}/cosmwasm/wasm/v1/contract/${contractAddress}/smart`;
-
-  log(`Sending contract query to: ${requestUrl}`, 'DEBUG');
-  log(`Encoded Payload: ${encodedPayload}`, 'DEBUG');
-
-  // Dynamically handle the block height header based on config
-  const headers = {};
-  if (config.blockHeight !== null) {
-    headers['x-cosmos-block-height'] = config.blockHeight.toString(); // Only add header if blockHeight is not null
-  }
-
+export async function sendContractQueryGrpc(contractAddress, payload, skip400ErrorLog = false) {
   try {
-    const configOptions = { headers }; // Attach dynamically constructed headers
-    const response = usePost
-      ? await axios.post(requestUrl, { base64_encoded_payload: encodedPayload }, configOptions)
-      : await axios.get(`${requestUrl}/${encodedPayload}`, configOptions);
+    log(`Sending gRPC contract query to: ${contractAddress}`, 'DEBUG');
+    log(`Payload: ${JSON.stringify(payload)}`, 'DEBUG');
 
-    if (response.status === 200) {
-      log(`Received response for contract ${contractAddress}`, 'DEBUG');
-      return { data: response.data, error: null, message: response.data.message || null };
+    const encodedPayload = Buffer.from(JSON.stringify(payload)).toString('base64');
+    const grpcPayload = {
+      address: contractAddress,
+      query_data: encodedPayload
+    };
+
+    // If block height is specified, add it to the query
+    if (config.blockHeight) {
+      grpcPayload.height = config.blockHeight.toString();
     }
 
-    if (response.status === 400 && skip400ErrorLog) {
-      return { data: null, error: null, message: response.data?.message || 'Expected 400 response' };
+    const response = await grpcClient["cosmwasm.wasm.v1.Query"].SmartContractState(grpcPayload);
+    
+    if (response && response.data) {
+      log(`Received gRPC response for contract ${contractAddress}`, 'DEBUG');
+      return { data: { data: JSON.parse(Buffer.from(response.data, 'base64').toString()) }, error: null, message: null };
     }
-
-    if ([404, 403, 501, 503].includes(response.status)) {
-      const errorMsg = `Error querying contract: ${response.status} - ${response.statusText}`;
-      log(errorMsg, 'ERROR');
-      return { data: null, error: errorMsg, message: response.data?.message || null };
-    }
-
-    return { data: response.data, error: `Unexpected status ${response.status}`, message: response.data?.message || null };
-
+    
+    return { data: null, error: "No data in response", message: null };
   } catch (error) {
-    const errorMsg = error.response?.data?.message || error.message;
-    if (!(skip400ErrorLog && error.response?.status === 400)) {
-      log(`Error querying contract ${contractAddress}: ${errorMsg}`, 'ERROR');
+    if (!skip400ErrorLog) {
+      log(`Error querying contract ${contractAddress} via gRPC: ${error.message}`, 'ERROR');
     }
-    return { data: null, error: errorMsg, message: error.response?.data?.message || null };
+    return { data: null, error: error.message, message: error.message };
   }
 }
 
-// Fetch paginated data with conventional pagination strategy
-export async function fetchPaginatedData(url, key, options = {}) {
+// Legacy method for backward compatibility
+export async function sendContractQuery(restAddress, contractAddress, payload, usePost = false, skip400ErrorLog = false) {
+  return sendContractQueryGrpc(contractAddress, payload, skip400ErrorLog);
+}
+
+/**
+ * Fetch data using gRPC client
+ * @param {string} method - The gRPC method to call
+ * @param {Object} payload - The payload for the gRPC call
+ */
+export async function fetchDataGrpc(method, payload, retries = 3) {
+  return retryOperation(async () => {
+    try {
+      // Map REST methods to gRPC methods
+      const methodMapping = {
+        "code": "Code",
+        "contracts": "ContractsByCode",
+        "latest_block": "LatestBlock", // This might need to come from a different service
+        "contract_info": "ContractInfo",
+        "contract_history": "ContractHistory"
+      };
+
+      const grpcMethod = methodMapping[method] || method;
+      
+      // Determine which service to use
+      let service = "cosmwasm.wasm.v1.Query";
+      if (method === "latest_block") {
+        service = "tendermint.BlockService"; // Might need adjustment
+      }
+
+      log(`Calling gRPC method ${service}.${grpcMethod} with payload: ${JSON.stringify(payload)}`, 'DEBUG');
+      const response = await grpcClient[service][grpcMethod](payload);
+      log(`gRPC response received: ${JSON.stringify(response)}`, 'DEBUG');
+      
+      return response;
+    } catch (error) {
+      log(`Error fetching data via gRPC: ${error.message}`, 'ERROR');
+      throw error;
+    }
+  }, retries);
+}
+
+// Legacy method for backward compatibility
+export async function fetchData(url, options = {}) {
+  // Extract endpoint from URL for mapping to gRPC methods
+  const endpoint = url.split('/').pop();
+  
+  // Convert URL/REST parameters to gRPC payload format
+  // This is a simplified approach and might need adjustments
+  let payload = {};
+  
+  if (url.includes('/code/')) {
+    const codeId = url.split('/code/')[1].split('/')[0];
+    payload = { code_id: codeId };
+    
+    if (url.includes('/contracts')) {
+      // Handling pagination for contracts endpoint
+      if (options.pagination && options.pagination.key) {
+        payload.pagination = { key: options.pagination.key };
+      }
+      if (options.pagination && options.pagination.limit) {
+        payload.pagination = { ...payload.pagination, limit: options.pagination.limit };
+      }
+      return fetchDataGrpc("contracts", payload);
+    }
+    
+    return fetchDataGrpc("code", payload);
+  } else if (url.includes('/contract/')) {
+    const contractAddress = url.split('/contract/')[1].split('/')[0];
+    payload = { address: contractAddress };
+    
+    if (url.includes('/history')) {
+      return fetchDataGrpc("contract_history", payload);
+    }
+    
+    return fetchDataGrpc("contract_info", payload);
+  } else if (url.includes('/block')) {
+    return fetchDataGrpc("latest_block", {});
+  }
+  
+  // Fallback to REST if we can't map the endpoint
+  return axios(url, options).then(res => res.data);
+}
+
+// Fetch paginated data using gRPC
+export async function fetchPaginatedDataGrpc(method, key, options = {}) {
   const {
     limit = 100,
     retries = 3,
     delay = 1000,
-    backoffFactor = 2
+    backoffFactor = 2,
+    nextKey = null,
+    params = {}
   } = options;
 
   let allData = [];
-  let nextKey = null;
-  let pageCount = 0; // Track page count to determine if pagination logs are necessary
+  let pageKey = nextKey;
+  let pageCount = 0;
 
-  log(`Fetching data for ${url.split('/').pop()}`, 'INFO'); // Simplified to show only the endpoint ID or type
+  log(`Fetching data for ${method}`, 'INFO');
 
   while (true) {
-    const encodedNextKey = nextKey ? encodeURIComponent(nextKey) : '';
-    const requestUrl = `${url}?pagination.limit=${limit}${encodedNextKey ? `&pagination.key=${encodedNextKey}` : ''}`;
-
-    const operation = async () => axios.get(requestUrl);
+    // Prepare pagination parameters for gRPC
+    const payload = {
+      ...params,
+      pagination: {
+        limit: limit,
+        ...(pageKey && { key: pageKey })
+      }
+    };
 
     try {
-      const response = await retryOperation(operation, retries, delay, backoffFactor);
-      if (!response || response.status !== 200 || !response.data) {
-        log(`Unexpected response structure for ${url}`, 'ERROR');
+      // Call gRPC method with pagination
+      const response = await fetchDataGrpc(method, payload);
+      
+      if (!response) {
+        log(`Unexpected response structure for ${method}`, 'ERROR');
         return allData;
       }
 
-      const dataBatch = Array.isArray(response.data[key]) ? response.data[key] : [];
+      // Extract data based on key - may need adjustment based on gRPC response structure
+      const dataBatch = Array.isArray(response[key]) ? response[key] : [];
       allData = allData.concat(dataBatch);
 
       pageCount += 1;
-      nextKey = response.data.pagination?.next_key || null;
+      
+      // Extract next key from pagination
+      pageKey = response.pagination?.next_key || null;
 
-      if (!nextKey) break; // Stop if no next_key is present
+      if (!pageKey) break; // Stop if no next_key is present
 
       // Only log pagination if multiple pages are encountered
       if (pageCount > 1) {
-        log(`Fetching additional page (${pageCount}) for ${url.split('/').pop()}`, 'INFO');
+        log(`Fetching additional page (${pageCount}) for ${method}`, 'INFO');
       }
 
       if (dataBatch.length < limit) break;
     } catch (error) {
-      log(`Error fetching paginated data from ${url}: ${error.message}`, 'ERROR');
+      log(`Error fetching paginated data from ${method}: ${error.message}`, 'ERROR');
       return allData;
     }
   }
 
-  log(`Fetched ${allData.length} items for ${url.split('/').pop()}`, 'INFO'); // Final count log
+  log(`Fetched ${allData.length} items for ${method}`, 'INFO');
   return allData;
+}
+
+// Legacy method for backward compatibility
+export async function fetchPaginatedData(url, key, options = {}) {
+  // Map URL to gRPC method
+  let method;
+  let params = {};
+  
+  if (url.includes('/cosmwasm/wasm/v1/code')) {
+    method = "Codes";
+    
+    // Extract code_id from URL if present
+    const matches = url.match(/\/code\/(\d+)\/contracts/);
+    if (matches && matches[1]) {
+      method = "ContractsByCode";
+      params.code_id = matches[1];
+    }
+  }
+  
+  return fetchPaginatedDataGrpc(method, key, {
+    ...options,
+    params
+  });
 }
 
 // Helper function to batch database operations
@@ -258,37 +361,6 @@ export function batchInsertOrUpdate(tableName, columns, values, uniqueColumns) {
     log(`Failed to process rows in ${tableName}: ${error.message}`, 'ERROR');
     throw error; // Re-throw the error to allow higher-level handling
   }
-}
-
-// General-purpose HTTP request with retry logic
-export async function fetchData(url, options = {}) {
-  const { method = 'GET', data = null, headers = {}, retries = 3 } = options;
-
-  const response = await retryOperation(async () => {
-    try {
-      const requestConfig = {
-        method,
-        url,
-        timeout: config.timeout,
-        headers,
-        ...(data && { data })
-      };
-
-      const res = await axios(requestConfig);
-      log(`Received response for ${method} request: ${JSON.stringify(res.data)}`, 'DEBUG');
-      
-      if (res.status !== 200) {
-        log(`Failed to fetch data: ${res.status} - ${res.statusText}`, 'ERROR');
-        return null;
-      }
-      return res.data;
-    } catch (error) {
-      log(`Error ${method} data to/from ${url}: ${error.message}`, 'ERROR');
-      return null;
-    }
-  }, retries);
-  
-  return response || {};
 }
 
 export function createWebSocketConnection(url, onMessageCallback, onErrorCallback) {
