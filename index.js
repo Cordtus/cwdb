@@ -41,7 +41,7 @@ async function runIndexer() {
       { name: 'fetchContractHistory', action: () => fetchContractHistory(config.restAddress) },
       { name: 'identifyContractTypes', action: () => identifyContractTypes(config.restAddress) },
       { name: 'fetchTokensAndOwners', action: () => fetchTokensAndOwners(config.restAddress) },
-      { name: 'fetchPointerData', action: () => fetchPointerData(config.pointerApi) },
+//    { name: 'fetchPointerData', action: () => fetchPointerData(config.pointerApi) },
 //    { name: 'fetchAssociatedWallets', action: () => fetchAssociatedWallets(config.evmRpcAddress) }
     ];
 
