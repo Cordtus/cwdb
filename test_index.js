@@ -4,10 +4,8 @@ import {
   fetchContractMetadata,
   fetchContractHistory, 
   identifyContractTypes, 
-  fetchTokensAndOwners, 
-  fetchPointerData, 
-  fetchAssociatedWallets, 
-} from './contractHelper.js';
+  fetchTokensAndOwners
+} from './contractCaller.js';
 import { log, db, fetchData, initializeBlockHeight } from './utils.js';
 import { config } from './config.js';
 import { initializeDatabase } from './initDb.js';
@@ -29,8 +27,7 @@ async function fetchCodeIdForContract(contractAddress) {
 
 async function seedContracts() {
   const contracts = [
-    "sei1g2a0q3tddzs7vf7lk45c2tgufsaqerxmsdr2cprth3mjtuqxm60qdmravc",
-    "sei1v90ly54qeu7497lzk2mnmp2h29sgtep8hs5ryvfqf8dwq5gc0t9srp6aey"
+    ""
   ];
 
   try {
@@ -73,9 +70,7 @@ async function runTestIndexer() {
       { name: 'fetchContractMetadata', action: () => fetchContractMetadata(config.restAddress) },
       { name: 'fetchContractHistory', action: () => fetchContractHistory(config.restAddress) },
       { name: 'identifyContractTypes', action: () => identifyContractTypes(config.restAddress) },
-      { name: 'fetchTokensAndOwners', action: () => fetchTokensAndOwners(config.restAddress) },
-      { name: 'fetchPointerData', action: () => fetchPointerData(config.pointerApi) },
-      { name: 'fetchAssociatedWallets', action: () => fetchAssociatedWallets(config.evmRpcAddress) }
+      { name: 'fetchTokensAndOwners', action: () => fetchTokensAndOwners(config.restAddress) }
     ];
 
     for (const step of steps) {
