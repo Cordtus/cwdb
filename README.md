@@ -20,9 +20,9 @@ Simple indexer that queries cw contracts, specifically focusing on CW721, CW404,
 
 ## Prerequisites
 
-- Node.js (version >= 14.x)
+- Node.js
 - SQLite3
-- [Preferably non-rate-limited] RPC endpoints.
+- Compatible [Preferably non-rate-limited] endpoints.
 
 ## Configuration
 
@@ -32,14 +32,14 @@ The main configuration is in `config.js`:
 // config.js
 
 export const config = {
-  blockHeight: 1,
+  blockHeight: "null",
   paginationLimit: 100,
   concurrencyLimit: 5,
   numWorkers: 4,
+  rpcAddress: "http://localhost:26657",
   restAddress: "http://localhost:1317",
+  grpcAddress: "localhost:9090",
   wsAddress: "ws://localhost:26657/websocket",
-  evmRpcAddress: "http://localhost:8545",
-  pointerApi: "https://pointer.basementnodes.ca",
   timeout: 5000,
   logLevel: 'DEBUG',
   logToFile: true,
@@ -61,8 +61,6 @@ The following tables are used in the SQLite database:
 - `contract_tokens`: Stores token data for each contract.
 - `contract_history`: Stores history details for each contract.
 - `nft_owners`: Stores ownership details for each token.
-- `pointer_data`: Tracks data related to pointer contracts.
-- `wallet_associations`: Maps wallet addresses to their EVM counterparts.
 
 ## Running the Indexer
 
