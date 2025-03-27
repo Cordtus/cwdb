@@ -6,9 +6,7 @@ import {
   fetchContractMetadata,
   fetchContractHistory,
   identifyContractTypes,
-  fetchTokensAndOwners,
-  fetchPointerData,
-  fetchAssociatedWallets 
+  fetchTokensAndOwners
 } from './contractHelper.js';
 import { 
   createWebSocketConnection,
@@ -40,9 +38,7 @@ async function runIndexer() {
       { name: 'fetchContractMetadata', action: () => fetchContractMetadata(config.restAddress) },
       { name: 'fetchContractHistory', action: () => fetchContractHistory(config.restAddress) },
       { name: 'identifyContractTypes', action: () => identifyContractTypes(config.restAddress) },
-      { name: 'fetchTokensAndOwners', action: () => fetchTokensAndOwners(config.restAddress) },
-      { name: 'fetchPointerData', action: () => fetchPointerData(config.pointerApi) },
-      { name: 'fetchAssociatedWallets', action: () => fetchAssociatedWallets(config.evmRpcAddress) }
+      { name: 'fetchTokensAndOwners', action: () => fetchTokensAndOwners(config.restAddress) }
     ];
 
     let allStepsCompleted = true;
