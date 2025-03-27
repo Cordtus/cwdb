@@ -7,7 +7,7 @@ import {
   fetchContractHistory,
   identifyContractTypes,
   fetchTokensAndOwners
-} from './contractHelper.js';
+} from './contractCaller.js';
 import { 
   createWebSocketConnection,
   log,
