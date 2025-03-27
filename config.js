@@ -1,13 +1,13 @@
 // config.js
 
 export const config = {
-  blockHeight: "",
+  blockHeight: null,
   paginationLimit: 100,
   concurrencyLimit: 8,
   numWorkers: 6,
-  restAddress: "https://api.sei.basementnodes.ca",
-  wsAddress: "wss://evm-rpc-ws.sei.basementnodes.ca",
-  evmRpcAddress: "https://evm-rpc.sei.basementnodes.ca",
+  restAddress: "http://rpc.sei-main-eu.ccvalidators.com:8082",
+  wsAddress: "http://rpc.sei-main-eu.ccvalidators.com:8086",
+  evmRpcAddress: "http://rpc.sei-main-eu.ccvalidators.com:8085",
   pointerApi: "https://pointer.basementnodes.ca",
   timeout: 5000,
   logLevel: 'INFO',

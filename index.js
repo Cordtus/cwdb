@@ -42,7 +42,7 @@ async function runIndexer() {
       { name: 'identifyContractTypes', action: () => identifyContractTypes(config.restAddress) },
       { name: 'fetchTokensAndOwners', action: () => fetchTokensAndOwners(config.restAddress) },
       { name: 'fetchPointerData', action: () => fetchPointerData(config.pointerApi) },
-      { name: 'fetchAssociatedWallets', action: () => fetchAssociatedWallets(config.evmRpcAddress) }
+//    { name: 'fetchAssociatedWallets', action: () => fetchAssociatedWallets(config.evmRpcAddress) }
     ];
 
     let allStepsCompleted = true;
