@@ -50,7 +50,7 @@ export function log(message, level = 'INFO') {
 export async function initializeBlockHeight() {
   if (!config.blockHeight || config.blockHeight === "") {  // check for falsy/empty
     try {
-      const response = await fetchData("https://rpc.sei.basementnodes.ca/block");
+      const response = await fetchData(`${config.rpcAddress}/block`);
       config.blockHeight = parseInt(response.block.header.height, 10);
       log(`Block height not specified. Using fetched blockHeight: ${config.blockHeight}`, 'INFO');
     } catch (error) {
