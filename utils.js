@@ -99,8 +99,8 @@ export async function sendContractQuery(restAddress, contractAddress, payload, u
 
   // Dynamically handle the block height header based on config
   const headers = {};
-  if (config.blockHeight !== null) {
-    headers['x-cosmos-block-height'] = config.blockHeight.toString(); // Only add header if blockHeight is not null
+  if (config.blockHeight && config.blockHeight !== "") {
+    headers['x-cosmos-block-height'] = config.blockHeight.toString(); // Only add header if blockHeight is set
   }
 
   try {

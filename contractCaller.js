@@ -14,6 +14,7 @@ import {
 import axios from 'axios';
 import pLimit from 'p-limit';
 import { config } from './config.js';
+import { getOrCreateContractType, getOperationTypeId } from './initDb.js';
 
 // fetch all code IDs
 export async function fetchCodeIds(restAddress) {
@@ -47,8 +48,12 @@ export async function fetchCodeIds(restAddress) {
         break;
       }
 
-      const batchData = response.map(({ code_id, creator, instantiate_permission }) => 
-        [code_id, creator, JSON.stringify(instantiate_permission)]
+      const batchData = response.map(({ code_id, creator, instantiate_permission }) =>
+        [
+          parseInt(code_id),
+          creator,
+          JSON.stringify(instantiate_permission)
+        ]
       );
 
       // Batch insert and log each processed batch
@@ -141,8 +146,8 @@ export async function fetchContractAddressesByCodeId(restAddress) {
       totalContracts += contractCount;
 
       if (contractCount > 0) {
-        const batchData = allContracts.map(addr => [code_id, addr, null]);
-        await batchInsertOrUpdate('contracts', ['code_id', 'address', 'type'], batchData, 'address');
+        const batchData = allContracts.map(addr => [parseInt(code_id), addr, null]);
+        await batchInsertOrUpdate('contracts', ['code_id', 'address', 'type_id'], batchData, 'address');
         log(`Recorded ${contractCount} contracts for code_id ${code_id}`, 'INFO');
       } else {
         log(`No contracts found for code_id ${code_id}`, 'INFO');
@@ -193,20 +198,23 @@ export async function fetchContractHistory(restAddress) {
             break;
           }
 
-          // Insert history entries into the database
-          const insertData = entries.map(entry => [
-            contractAddress,
-            entry.operation || '',
-            entry.code_id || '',
-            entry.updated || '',
-            JSON.stringify(entry.msg).replace(/"/g, '""').replace(/\\/g, '\\\\'),
-          ]);
+          // Get operation type IDs
+          const insertData = entries.map(entry => {
+            const operationId = getOperationTypeId(db, entry.operation);
+            return [
+              contractAddress,
+              operationId || 1, // Default to 1 if not found
+              parseInt(entry.code_id || '0'),
+              entry.updated || new Date().toISOString(),
+              JSON.stringify(entry.msg).replace(/"/g, '""').replace(/\\/g, '\\\\'),
+            ];
+          });
 
           await batchInsertOrUpdate(
             'contract_history',
-            ['contract_address', 'operation', 'code_id', 'updated', 'msg'],
+            ['contract_address', 'operation_id', 'code_id', 'updated_at', 'msg'],
             insertData,
-            ['contract_address', 'operation', 'code_id'] // Correct ON CONFLICT to use composite key
+            null // No unique constraint, using auto-increment ID
           );
 
           log(`Inserted ${entries.length} history entries for ${contractAddress}`, 'DEBUG');
@@ -277,6 +285,7 @@ export async function fetchContractMetadata(restAddress) {
           if (response?.data?.contract_info) {
             const { code_id, creator, admin, label } = response.data.contract_info;
             let contractType = null;
+            let typeId = null;
 
             // 1) Attempt to detect from label
             if (label) {
@@ -289,6 +298,10 @@ export async function fetchContractMetadata(restAddress) {
                 contractType = 'cw1155';
               } else if (labelLower.includes('cw404')) {
                 contractType = 'cw404';
+              }
+              
+              if (contractType) {
+                typeId = getOrCreateContractType(db, contractType);
               }
             }
 
@@ -305,6 +318,7 @@ export async function fetchContractMetadata(restAddress) {
                 // If it has a `symbol` in the contract_info, assume `cw20`
                 if (infoResponse?.data?.data?.symbol) {
                   contractType = 'cw20';
+                  typeId = getOrCreateContractType(db, contractType);
                 }
               } catch (error) {
                 // We'll let identifyContractTypes handle it if this fails
@@ -313,23 +327,36 @@ export async function fetchContractMetadata(restAddress) {
             }
 
             // 3) Update the DB
-            if (contractType && codeIdMap.has(code_id)) {
+            if (typeId && codeIdMap.has(code_id)) {
               // Update all contracts with the same code_id
               const relatedContracts = Array.from(codeIdMap.get(code_id));
-              const batchData = relatedContracts.map(addr => [addr, code_id, creator, admin, label, contractType]);
+              const batchData = relatedContracts.map(addr => [
+                addr,
+                parseInt(code_id),
+                creator || null,
+                admin || null,
+                label,
+                typeId
+              ]);
               await batchInsertOrUpdate(
                 'contracts',
-                ['address', 'code_id', 'creator', 'admin', 'label', 'type'],
+                ['address', 'code_id', 'creator', 'admin', 'label', 'type_id'],
                 batchData,
                 'address'
               );
-              log(`Updated type ${contractType} for all contracts with code_id ${code_id}`, 'DEBUG');
+              log(`Updated type_id ${typeId} for all contracts with code_id ${code_id}`, 'DEBUG');
             } else {
               // If no recognized type, store partial data and let identifyContractTypes fill in
               await batchInsertOrUpdate(
                 'contracts',
                 ['address', 'code_id', 'creator', 'admin', 'label'],
-                [[contractAddress, code_id, creator, admin, label]],
+                [[
+                  contractAddress,
+                  parseInt(code_id),
+                  creator || null,
+                  admin || null,
+                  label
+                ]],
                 'address'
               );
             }
@@ -371,7 +398,7 @@ export async function identifyContractTypes(restAddress) {
     const contracts = db.prepare(`
       SELECT address
       FROM contracts
-      WHERE type IS NULL OR type = '' OR type = 'unknown'
+      WHERE type_id IS NULL
     `).all().map(row => row.address);
 
     if (!contracts.length) {
@@ -429,12 +456,20 @@ export async function identifyContractTypes(restAddress) {
 
         // If a known type was found, update it. Otherwise, do not overwrite.
         if (contractType) {
-          batchData.push([contractAddress, contractType]);
+          const typeId = getOrCreateContractType(db, contractType);
+          batchData.push([contractAddress, typeId]);
         }
         processedCount++;
 
         if (batchData.length >= batchSize) {
-          await batchInsertOrUpdate('contracts', ['address', 'type'], batchData, 'address');
+          // Update with type_id instead of type name
+          const updateStmt = db.prepare('UPDATE contracts SET type_id = ? WHERE address = ?');
+          db.transaction(() => {
+            batchData.forEach(([addr, typeId]) => {
+              updateStmt.run(typeId, addr);
+            });
+          })();
+          
           batchData = [];
           batchProgressUpdates.push({
             step: 'identifyContractTypes',
@@ -453,8 +488,13 @@ export async function identifyContractTypes(restAddress) {
 
     // Insert remaining updates
     if (batchData.length > 0) {
-      await batchInsertOrUpdate('contracts', ['address', 'type'], batchData, 'address');
-      log(`Final batch inserted contract types for ${batchData.length} contracts`, 'DEBUG');
+      const updateStmt = db.prepare('UPDATE contracts SET type_id = ? WHERE address = ?');
+      db.transaction(() => {
+        batchData.forEach(([addr, typeId]) => {
+          updateStmt.run(typeId, addr);
+        });
+      })();
+      log(`Final batch updated contract types for ${batchData.length} contracts`, 'DEBUG');
     }
 
     // Mark progress
@@ -473,12 +513,23 @@ export async function fetchTokensAndOwners(restAddress) {
   const delayBetweenBatches = 100;
   const concurrencyLimit = config.concurrencyLimit || 5;
   const limit = pLimit(concurrencyLimit);
+  const progressSaveInterval = 50; // Save progress every 50 contracts
 
   try {
     const progress = checkProgress('fetchTokensAndOwners');
-    const contracts = db.prepare("SELECT address, type FROM contracts WHERE type IN ('cw721', 'cw1155', 'cw404', 'cw20_base')").all();
+    const contracts = db.prepare(`
+      SELECT c.address, ct.type_name as type 
+      FROM contracts c
+      JOIN contract_types ct ON c.type_id = ct.id
+      WHERE ct.type_name IN ('cw721', 'cw1155', 'cw404', 'cw20', 'cw20_base')
+    `).all();
     const startIndex = progress.last_processed ? contracts.findIndex(contract => contract.address === progress.last_processed) + 1 : 0;
-    let batchProgressUpdates = [];
+    let processedCount = 0;
+    
+    if (startIndex > 0) {
+      log(`Resuming fetchTokensAndOwners from previous run: ${startIndex} contracts already processed`, 'INFO');
+    }
+    log(`Starting fetchTokensAndOwners: ${contracts.length} total contracts, starting from index ${startIndex}`, 'INFO');
 
     for (let i = startIndex; i < contracts.length; i++) {
       const { address: contractAddress, type: contractType } = contracts[i];
@@ -486,9 +537,9 @@ export async function fetchTokensAndOwners(restAddress) {
       let ownershipData = [];
       let lastTokenFetched = null;
 
-      log(`Fetching tokens for contract ${contractAddress} of type ${contractType}`, 'INFO');
+      log(`[${i + 1}/${contracts.length}] Fetching tokens for contract ${contractAddress} of type ${contractType}`, 'INFO');
 
-      if (contractType === 'cw20_base') {
+      if (contractType === 'cw20' || contractType === 'cw20_base') {
         // Handle cw20 contract type
         const tokenInfoResponse = await sendContractQuery(restAddress, contractAddress, { token_info: {} }, false, false);
         log(`Token info response for ${contractAddress}: ${JSON.stringify(tokenInfoResponse)}`, 'DEBUG');
@@ -502,7 +553,7 @@ export async function fetchTokensAndOwners(restAddress) {
         }
 
         log(`Recorded total supply for cw20 contract ${contractAddress}: ${totalSupply}`, 'INFO');
-        await batchInsertOrUpdate('contracts', ['address', 'tokens_minted'], [[contractAddress, totalSupply]], 'address');
+        await batchInsertOrUpdate('contracts', ['address', 'tokens_minted'], [[contractAddress, parseInt(totalSupply)]], 'address');
 
         let allAccounts = [];
         let paginationKey = null;
@@ -543,7 +594,12 @@ export async function fetchTokensAndOwners(restAddress) {
           log(`Inserted ${ownershipData.length} ownership records into cw20_owners for ${contractAddress}`, 'INFO');
         }
 
-        batchProgressUpdates.push({ step: 'fetchTokensAndOwners', completed: 0, lastProcessed: contractAddress });
+        // Save progress periodically
+        processedCount++;
+        if (processedCount % progressSaveInterval === 0) {
+          updateProgress('fetchTokensAndOwners', 0, contractAddress);
+          log(`Progress saved: ${i + 1}/${contracts.length} contracts processed`, 'INFO');
+        }
         await new Promise(resolve => setTimeout(resolve, delayBetweenBatches));
         continue;
       }
@@ -564,8 +620,9 @@ export async function fetchTokensAndOwners(restAddress) {
         lastTokenFetched = tokenIds[tokenIds.length - 1];
         log(`Fetched ${tokenIds.length} tokens for contract ${contractAddress}`, 'DEBUG');
 
-        const tokenData = tokenIds.map(tokenId => [contractAddress, tokenId]);
-        await batchInsertOrUpdate('contract_tokens', ['contract_address', 'token_id'], tokenData, ['contract_address', 'token_id']);
+        const typeId = getOrCreateContractType(db, contractType);
+        const tokenData = tokenIds.map(tokenId => [contractAddress, tokenId, typeId]);
+        await batchInsertOrUpdate('contract_tokens', ['contract_address', 'token_id', 'contract_type_id'], tokenData, ['contract_address', 'token_id']);
       }
 
       if (allTokens.length > 0) {
@@ -573,8 +630,9 @@ export async function fetchTokensAndOwners(restAddress) {
         log(`Updated tokens_minted for contract ${contractAddress} with total tokens: ${allTokens.length}`, 'INFO');
 
         // Insert to `nft_owners` table
-        const nftOwnerData = allTokens.map(tokenId => [contractAddress, tokenId]);
-        await batchInsertOrUpdate('nft_owners', ['collection_address', 'token_id'], nftOwnerData, ['collection_address', 'token_id']);
+        const typeId = getOrCreateContractType(db, contractType);
+        const nftOwnerData = allTokens.map(tokenId => [contractAddress, tokenId, null, typeId]);
+        await batchInsertOrUpdate('nft_owners', ['collection_address', 'token_id', 'owner', 'contract_type_id'], nftOwnerData, ['collection_address', 'token_id']);
         log(`Inserted ${nftOwnerData.length} records into nft_owners for contract ${contractAddress}`, 'INFO');
         // Fetch and update detailed token info
         const tokenPromises = allTokens.map(tokenId => limit(async () => {
@@ -589,10 +647,11 @@ export async function fetchTokensAndOwners(restAddress) {
               const metadata = info?.extension;
 
               // Update token info
+              const typeId = getOrCreateContractType(db, contractType);
               await batchInsertOrUpdate(
                 'contract_tokens',
-                ['contract_address', 'token_id', 'contract_type', 'token_uri', 'metadata'],
-                [[contractAddress, tokenId, contractType, tokenUri, JSON.stringify(metadata)]],
+                ['contract_address', 'token_id', 'contract_type_id', 'token_uri', 'metadata'],
+                [[contractAddress, tokenId, typeId, tokenUri, JSON.stringify(metadata)]],
                 ['contract_address', 'token_id']
               );
 
@@ -600,8 +659,8 @@ export async function fetchTokensAndOwners(restAddress) {
               if (owner) {
                 await batchInsertOrUpdate(
                   'nft_owners',
-                  ['collection_address', 'token_id', 'owner', 'contract_type'],
-                  [[contractAddress, tokenId, owner, contractType]],
+                  ['collection_address', 'token_id', 'owner', 'contract_type_id'],
+                  [[contractAddress, tokenId, owner, typeId]],
                   ['collection_address', 'token_id']
                 );
               }
@@ -617,13 +676,18 @@ export async function fetchTokensAndOwners(restAddress) {
         continue;
       }
 
-      batchProgressUpdates.push({ step: 'fetchTokensAndOwners', completed: 0, lastProcessed: contractAddress });
+      // Save progress periodically
+      processedCount++;
+      if (processedCount % progressSaveInterval === 0) {
+        updateProgress('fetchTokensAndOwners', 0, contractAddress);
+        log(`Progress saved: ${i + 1}/${contracts.length} contracts processed`, 'INFO');
+      }
       await new Promise(resolve => setTimeout(resolve, delayBetweenBatches));
     }
 
-    batchProgressUpdates.push({ step: 'fetchTokensAndOwners', completed: 1 });
-    batchProgressUpdates.forEach(update => updateProgress(update.step, update.completed, update.lastProcessed));
-    log('Finished processing tokens and ownership for all contracts.', 'INFO');
+    // Mark as completed
+    updateProgress('fetchTokensAndOwners', 1);
+    log(`Finished processing tokens and ownership for all ${contracts.length} contracts.`, 'INFO');
   } catch (error) {
     log(`Error in fetchTokensAndOwners: ${error.message}`, 'ERROR');
     throw error;
