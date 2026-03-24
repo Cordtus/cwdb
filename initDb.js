@@ -87,22 +87,6 @@ export function initializeDatabase(isTest = false) {
       FOREIGN KEY (contract_type_id) REFERENCES contract_types(id)
     )`,
 
-    `CREATE TABLE IF NOT EXISTS pointer_data (
-      contract_address CHAR(68) PRIMARY KEY,
-      pointer_address CHAR(68) NOT NULL,
-      pointee_address CHAR(68) NOT NULL,
-      is_base_asset BOOLEAN DEFAULT 0,
-      is_pointer BOOLEAN DEFAULT 0,
-      pointer_type TEXT,
-      created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-      FOREIGN KEY (contract_address) REFERENCES contracts(address)
-    )`,
-
-    `CREATE TABLE IF NOT EXISTS wallet_associations (
-      wallet_address CHAR(68) PRIMARY KEY,
-      evm_address CHAR(44),
-      created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-    )`
   ];
 
   const createIndexStatements = [
@@ -116,7 +100,6 @@ export function initializeDatabase(isTest = false) {
     `CREATE INDEX IF NOT EXISTS idx_nft_owners_collection ON nft_owners(collection_address)`,
     `CREATE INDEX IF NOT EXISTS idx_nft_owners_owner ON nft_owners(owner)`,
     `CREATE INDEX IF NOT EXISTS idx_cw20_owners_owner ON cw20_owners(owner_address)`,
-    `CREATE INDEX IF NOT EXISTS idx_wallet_assoc_evm ON wallet_associations(evm_address)`
   ];
 
   const progressSteps = [
