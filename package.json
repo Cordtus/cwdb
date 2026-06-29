@@ -6,13 +6,11 @@
   "type": "module",
   "scripts": {
     "start": "node index.js",
-    "realtime": "node realtime_index.js",
-    "lint": "eslint '**/*.js'",
-    "lint:fix": "eslint '**/*.js' --fix",
-    "test": "bash ./run-tests.sh",
-    "single-contract": "rm -f ./data/*.db ./logs/*.log; node index-single.js",
     "dev": "nodemon index.js",
-    "generate-grpc": "node grpcGen.js"
+    "test": "node --test tests/*.test.js",
+    "test:pipeline": "node test_index.js",
+    "lint": "eslint '**/*.js'",
+    "lint:fix": "eslint '**/*.js' --fix"
   },
   "keywords": [
     "CosmWasm",
@@ -26,8 +24,7 @@
   "dependencies": {
     "@grpc/grpc-js": "^1.14.3",
     "axios": "^1.7.3",
-    "better-sqlite3": "^11.5.0",
-    "child_process": "^1.0.2",
+    "better-sqlite3": "^12.11.1",
     "p-limit": "^4.0.0",
     "protobufjs": "^8.0.0",
     "ws": "^8.18.0"
@@ -45,6 +42,6 @@
     }
   },
   "engines": {
-    "node": ">=14.0.0"
+    "node": ">=18.0.0"
   }
 }

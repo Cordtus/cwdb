@@ -7,6 +7,7 @@
 import * as grpc from '@grpc/grpc-js';
 import protobuf from 'protobufjs';
 import { config } from './config.js';
+import { normalizeGrpcAddress, resolveGrpcAddress, resolveGrpcTimeoutMs } from './grpcAddress.js';
 
 /** Protobuf type definitions for Cosmos/CosmWasm queries (field IDs match upstream protos) */
 const root = protobuf.Root.fromJSON({
@@ -192,15 +193,16 @@ const tendermintDef = createServiceDef('cosmos.base.tendermint.v1beta1.Service',
  */
 function promisifyMethod(client, method) {
 	return (request) => new Promise((resolve, reject) => {
-		client[method](request, (err, response) => {
+		const deadline = new Date(Date.now() + resolveGrpcTimeoutMs(config));
+		client[method](request, new grpc.Metadata(), { deadline }, (err, response) => {
 			if (err) reject(err);
 			else resolve(response);
 		});
 	});
 }
 
-/** Determine TLS credentials based on port */
-const useTls = config.grpcAddress.includes(':443');
+/** Determine TLS credentials and grpc-js target from the configured endpoint. */
+const { target: grpcTarget, useTls } = normalizeGrpcAddress(resolveGrpcAddress(config));
 const creds = useTls
 	? grpc.credentials.createSsl()
 	: grpc.credentials.createInsecure();
@@ -216,8 +218,8 @@ const channelOpts = {
 const WasmClient = grpc.makeClientConstructor(wasmQueryDef, 'Query');
 const TendermintClient = grpc.makeClientConstructor(tendermintDef, 'Service');
 
-const wasmClient = new WasmClient(config.grpcAddress, creds, channelOpts);
-const tendermintClient = new TendermintClient(config.grpcAddress, creds, channelOpts);
+const wasmClient = new WasmClient(grpcTarget, creds, channelOpts);
+const tendermintClient = new TendermintClient(grpcTarget, creds, channelOpts);
 
 /**
  * Exported gRPC client with promisified methods.

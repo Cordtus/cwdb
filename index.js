@@ -16,6 +16,7 @@ import {
 import { config } from './config.js';
 import { initializeDatabase } from './initDb.js';
 import { closeConnections } from './grpcClient.js';
+import { resolveGrpcAddress } from './grpcAddress.js';
 import fs from 'fs';
 
 // Ensure data and logs directories exist
@@ -30,7 +31,7 @@ async function runIndexer() {
 		await initializeBlockHeight();
 
 		log(`CosmWasm gRPC Indexer started with log level: ${config.logLevel}`, 'INFO');
-		log(`gRPC endpoint: ${config.grpcAddress}`, 'INFO');
+		log(`gRPC endpoint: ${resolveGrpcAddress(config)}`, 'INFO');
 		initializeDatabase();
 		log('Database initialized successfully.', 'INFO');
 

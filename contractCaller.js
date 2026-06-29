@@ -1,7 +1,6 @@
 // contractCaller.js
 import {
 	sendContractQueryGrpc,
-	retryOperation,
 	log,
 	batchInsertOrUpdate,
 	checkProgress,
@@ -10,9 +9,20 @@ import {
 	db
 } from './utils.js';
 import { getOrCreateContractType, getOperationTypeId } from './initDb.js';
+import { buildNftInfoRows, historyEntryToRow, inferContractTypeFromError } from './pipelineData.js';
 import pLimit from 'p-limit';
 import { config } from './config.js';
 import { grpcClient } from './grpcClient.js';
+
+function updateContractTypeBatch(batchData) {
+	if (batchData.length === 0) return;
+	const update = db.prepare('UPDATE contracts SET type_id = ? WHERE address = ?');
+	db.transaction((rows) => {
+		for (const [contractAddress, typeId] of rows) {
+			update.run(typeId, contractAddress);
+		}
+	})(batchData);
+}
 
 /**
  * Fetches all code IDs from the chain via gRPC and stores them in the database.
@@ -30,7 +40,7 @@ export async function fetchCodeIds() {
 		let batchCount = 0;
 		let batchProgressUpdates = [];
 
-		while (true) {
+		for (;;) {
 			const payload = {
 				pagination: {
 					limit: config.paginationLimit,
@@ -109,7 +119,7 @@ export async function fetchContractAddressesByCodeId() {
 			let nextKey = null;
 			let page = 1;
 
-			while (true) {
+			for (;;) {
 				const payload = {
 					code_id: code_id,
 					pagination: {
@@ -175,7 +185,7 @@ export async function fetchContractHistory() {
 			log(`Fetching contract history for ${contractAddress}`, 'INFO');
 			let nextKey = null;
 
-			while (true) {
+			for (;;) {
 				const payload = {
 					address: contractAddress,
 					pagination: {
@@ -192,20 +202,22 @@ export async function fetchContractHistory() {
 						break;
 					}
 
-					const insertData = response.entries.map(entry => [
-						contractAddress,
-						entry.operation || '',
-						entry.code_id || '',
-						entry.updated?.block_height || '',
-						JSON.stringify(entry.msg || {}).replace(/"/g, '""').replace(/\\/g, '\\\\'),
-					]);
+					const insertData = response.entries
+						.map(entry => historyEntryToRow({
+							contractAddress,
+							entry,
+							resolveOperationId: (operationName) => getOperationTypeId(db, operationName)
+						}))
+						.filter(Boolean);
 
-					await batchInsertOrUpdate(
-						'contract_history',
-						['contract_address', 'operation', 'code_id', 'updated', 'msg'],
-						insertData,
-						['contract_address', 'operation', 'code_id']
-					);
+					if (insertData.length > 0) {
+						await batchInsertOrUpdate(
+							'contract_history',
+							['contract_address', 'operation_id', 'code_id', 'updated_at', 'msg'],
+							insertData,
+							['contract_address', 'operation_id', 'code_id', 'updated_at']
+						);
+					}
 
 					log(`Inserted ${response.entries.length} history entries for ${contractAddress}`, 'DEBUG');
 
@@ -253,15 +265,6 @@ export async function fetchContractMetadata() {
 
 		log(`Starting fetchContractMetadata for ${totalContracts} contracts. Resuming from index ${startIndex}.`, 'INFO');
 
-		const codeIdMap = new Map();
-		const contractsByCodeId = db.prepare('SELECT code_id, address FROM contracts').all();
-		contractsByCodeId.forEach(({ code_id, address }) => {
-			if (!codeIdMap.has(code_id)) {
-				codeIdMap.set(code_id, new Set());
-			}
-			codeIdMap.get(code_id).add(address);
-		});
-
 		for (let i = startIndex; i < totalContracts; i += batchSize) {
 			const batch = contractAddresses.slice(i, i + batchSize);
 			const limit = pLimit(config.concurrencyLimit);
@@ -285,7 +288,7 @@ export async function fetchContractMetadata() {
 
 						if (!contractType) {
 							try {
-								const infoResponse = await sendContractQueryGrpc(contractAddress, { contract_info: {} }, false);
+								const infoResponse = await sendContractQueryGrpc(contractAddress, { contract_info: {} }, true);
 								if (infoResponse?.data?.data?.symbol) {
 									contractType = 'cw20';
 								}
@@ -296,16 +299,13 @@ export async function fetchContractMetadata() {
 
 						const typeId = contractType ? getOrCreateContractType(db, contractType) : null;
 
-						if (typeId && codeIdMap.has(String(code_id))) {
-							const relatedContracts = Array.from(codeIdMap.get(String(code_id)));
-							const batchData = relatedContracts.map(addr => [addr, code_id, creator, admin, label, typeId]);
+						if (typeId) {
 							await batchInsertOrUpdate(
 								'contracts',
 								['address', 'code_id', 'creator', 'admin', 'label', 'type_id'],
-								batchData,
+								[[contractAddress, code_id, creator, admin, label, typeId]],
 								'address'
 							);
-							log(`Updated type_id ${typeId} for all contracts with code_id ${code_id}`, 'DEBUG');
 						} else {
 							await batchInsertOrUpdate(
 								'contracts',
@@ -353,7 +353,7 @@ export async function identifyContractTypes() {
 		const contracts = db.prepare(`
 			SELECT address
 			FROM contracts
-			WHERE type_id IS NULL
+			ORDER BY address
 		`).all().map(row => row.address);
 
 		if (!contracts.length) {
@@ -382,17 +382,10 @@ export async function identifyContractTypes() {
 					if (response?.message) {
 						log(`Debug: Full error message for ${contractAddress}: ${response.message}`, 'DEBUG');
 
-						const match = response.message.match(/Error parsing into type (.+?):/);
-						if (match) {
-							const extractedType = match[1].toLowerCase();
-							const knownTypes = ['cw721', 'cw20', 'cw404', 'cw1155'];
-							const found = knownTypes.find(t => extractedType.includes(t));
-							if (found) {
-								contractType = found;
-								log(`Identified contract type for ${contractAddress}: ${contractType}`, 'INFO');
-							} else {
-								log(`Extracted type "${extractedType}" not recognized for ${contractAddress}`, 'INFO');
-							}
+						const found = inferContractTypeFromError(response.message);
+						if (found) {
+							contractType = found;
+							log(`Identified contract type for ${contractAddress}: ${contractType}`, 'INFO');
 						} else {
 							log(`No recognizable type in error message for contract ${contractAddress}`, 'INFO');
 						}
@@ -412,7 +405,7 @@ export async function identifyContractTypes() {
 				processedCount++;
 
 				if (batchData.length >= batchSize) {
-					await batchInsertOrUpdate('contracts', ['address', 'type_id'], batchData, 'address');
+					updateContractTypeBatch(batchData);
 					batchData = [];
 					batchProgressUpdates.push({
 						step: 'identifyContractTypes',
@@ -430,8 +423,8 @@ export async function identifyContractTypes() {
 		await Promise.allSettled(typePromises);
 
 		if (batchData.length > 0) {
-			await batchInsertOrUpdate('contracts', ['address', 'type_id'], batchData, 'address');
-			log(`Final batch inserted contract types for ${batchData.length} contracts`, 'DEBUG');
+			updateContractTypeBatch(batchData);
+			log(`Final batch updated contract types for ${batchData.length} contracts`, 'DEBUG');
 		}
 
 		batchProgressUpdates.push({ step: 'identifyContractTypes', completed: 1 });
@@ -460,7 +453,17 @@ export async function fetchTokensAndOwners() {
 			WHERE ct.type_name IN ('cw721', 'cw1155', 'cw404', 'cw20_base', 'cw20')
 		`).all();
 		const startIndex = progress.last_processed ? contracts.findIndex(contract => contract.address === progress.last_processed) + 1 : 0;
-		let batchProgressUpdates = [];
+		let processedSinceProgressUpdate = 0;
+		let lastProcessedContract = progress.last_processed || null;
+		const updateTokenProgress = (contractAddress, force = false) => {
+			lastProcessedContract = contractAddress;
+			processedSinceProgressUpdate += 1;
+
+			if (force || processedSinceProgressUpdate >= 1) {
+				updateProgress('fetchTokensAndOwners', 0, lastProcessedContract);
+				processedSinceProgressUpdate = 0;
+			}
+		};
 
 		for (let i = startIndex; i < contracts.length; i++) {
 			const { address: contractAddress, type: contractType } = contracts[i];
@@ -471,27 +474,32 @@ export async function fetchTokensAndOwners() {
 			log(`Fetching tokens for contract ${contractAddress} of type ${contractType}`, 'INFO');
 
 			if (contractType === 'cw20_base' || contractType === 'cw20') {
-				const tokenInfoResponse = await sendContractQueryGrpc(contractAddress, { token_info: {} }, false);
+				const tokenInfoResponse = await sendContractQueryGrpc(contractAddress, { token_info: {} }, true);
 				log(`Token info response for ${contractAddress}: ${JSON.stringify(tokenInfoResponse)}`, 'DEBUG');
 
 				const totalSupply = tokenInfoResponse?.data?.data?.total_supply;
 
 				if (!totalSupply) {
-					log(`No supply or unsupported contract spec for cw20 contract ${contractAddress}. Skipping...`, 'ERROR');
-					batchProgressUpdates.push({ step: 'fetchTokensAndOwners', completed: 0, lastProcessed: contractAddress });
+					log(`No supply or unsupported CW20 token API for contract ${contractAddress}. Skipping owner scan.`, 'INFO');
+					updateTokenProgress(contractAddress);
 					continue;
 				}
 
 				log(`Recorded total supply for cw20 contract ${contractAddress}: ${totalSupply}`, 'INFO');
-				await batchInsertOrUpdate('contracts', ['address', 'tokens_minted'], [[contractAddress, totalSupply]], 'address');
+				db.prepare('UPDATE contracts SET tokens_minted = ? WHERE address = ?').run(totalSupply, contractAddress);
 
 				let allAccounts = [];
 				let paginationKey = null;
 
 				do {
 					const accountsQueryPayload = { all_accounts: { limit: config.paginationLimit, ...(paginationKey && { start_after: paginationKey }) } };
-					const accountsResponse = await sendContractQueryGrpc(contractAddress, accountsQueryPayload, false);
+					const accountsResponse = await sendContractQueryGrpc(contractAddress, accountsQueryPayload, true);
 					log(`Accounts response for ${contractAddress}: ${JSON.stringify(accountsResponse)}`, 'DEBUG');
+
+					if (accountsResponse?.error) {
+						log(`CW20 account enumeration is unsupported for contract ${contractAddress}. Supply was recorded; skipping owner scan.`, 'INFO');
+						break;
+					}
 
 					const accounts = accountsResponse?.data?.data?.accounts || [];
 					if (accounts.length > 0) {
@@ -524,83 +532,121 @@ export async function fetchTokensAndOwners() {
 					log(`Inserted ${ownershipData.length} ownership records into cw20_owners for ${contractAddress}`, 'INFO');
 				}
 
-				batchProgressUpdates.push({ step: 'fetchTokensAndOwners', completed: 0, lastProcessed: contractAddress });
+				updateTokenProgress(contractAddress);
 				await new Promise(resolve => setTimeout(resolve, delayBetweenBatches));
 				continue;
 			}
 
 			// Process NFT contract types (cw721, cw1155, cw404)
-			while (true) {
+			const seenTokenIds = new Set();
+			for (;;) {
 				const tokenQueryPayload = { all_tokens: { limit: config.paginationLimit, ...(lastTokenFetched && { start_after: lastTokenFetched }) } };
-				const response = await sendContractQueryGrpc(contractAddress, tokenQueryPayload, false);
+				const response = await sendContractQueryGrpc(contractAddress, tokenQueryPayload, true);
 				log(`Token response for ${contractAddress}: ${JSON.stringify(response)}`, 'DEBUG');
 
-				const tokenIds = response?.data?.data?.tokens || [];
+				if (response?.error) {
+					log(`Token enumeration is unsupported for contract ${contractAddress} of type ${contractType}. Skipping token owner scan.`, 'INFO');
+					break;
+				}
+
+				const tokenIds = (response?.data?.data?.tokens || []).map(tokenId => String(tokenId));
 				if (tokenIds.length === 0) {
 					log(`No more tokens found for contract ${contractAddress}`, 'INFO');
 					break;
 				}
 
-				allTokens.push(...tokenIds);
-				lastTokenFetched = tokenIds[tokenIds.length - 1];
-				log(`Fetched ${tokenIds.length} tokens for contract ${contractAddress}`, 'DEBUG');
+				const newTokenIds = tokenIds.filter(tokenId => !seenTokenIds.has(tokenId));
+				if (newTokenIds.length === 0) {
+					log(`Token pagination did not advance for contract ${contractAddress}. Stopping token enumeration.`, 'INFO');
+					break;
+				}
 
-				const tokenData = tokenIds.map(tokenId => [contractAddress, tokenId]);
+				newTokenIds.forEach(tokenId => seenTokenIds.add(tokenId));
+				allTokens.push(...newTokenIds);
+				lastTokenFetched = tokenIds[tokenIds.length - 1];
+				log(`Fetched ${newTokenIds.length} tokens for contract ${contractAddress}`, 'DEBUG');
+
+				const tokenData = newTokenIds.map(tokenId => [contractAddress, tokenId]);
 				await batchInsertOrUpdate('contract_tokens', ['contract_address', 'token_id'], tokenData, ['contract_address', 'token_id']);
+
+				if (!lastTokenFetched) {
+					log(`Token pagination returned an empty token ID for contract ${contractAddress}; stopping token enumeration because start_after cannot advance.`, 'INFO');
+					break;
+				}
 			}
 
 			if (allTokens.length > 0) {
-				await batchInsertOrUpdate('contracts', ['address', 'tokens_minted'], [[contractAddress, allTokens.length]], 'address');
+				db.prepare('UPDATE contracts SET tokens_minted = ? WHERE address = ?').run(allTokens.length, contractAddress);
 				log(`Updated tokens_minted for contract ${contractAddress} with total tokens: ${allTokens.length}`, 'INFO');
 
-				const nftOwnerData = allTokens.map(tokenId => [contractAddress, tokenId]);
-				await batchInsertOrUpdate('nft_owners', ['collection_address', 'token_id'], nftOwnerData, ['collection_address', 'token_id']);
-				log(`Inserted ${nftOwnerData.length} records into nft_owners for contract ${contractAddress}`, 'INFO');
+				const tokenTypeId = getOrCreateContractType(db, contractType);
+				const flushSize = 200;
+				const lookupChunkSize = Math.max(config.concurrencyLimit || 5, flushSize);
+				let tokenBatch = [];
+				let ownerBatch = [];
 
-				const tokenPromises = allTokens.map(tokenId => limit(async () => {
-					try {
-						const nftInfoPayload = { all_nft_info: { token_id: tokenId } };
-						const nftInfoResponse = await sendContractQueryGrpc(contractAddress, nftInfoPayload, false);
-
-						if (nftInfoResponse?.data?.data) {
-							const { access, info } = nftInfoResponse.data.data;
-							const owner = access?.owner;
-							const tokenUri = info?.token_uri;
-							const metadata = info?.extension;
-
-							const tokenTypeId = getOrCreateContractType(db, contractType);
-							await batchInsertOrUpdate(
-								'contract_tokens',
-								['contract_address', 'token_id', 'contract_type_id', 'token_uri', 'metadata'],
-								[[contractAddress, tokenId, tokenTypeId, tokenUri, JSON.stringify(metadata)]],
-								['contract_address', 'token_id']
-							);
-
-							if (owner) {
-								await batchInsertOrUpdate(
-									'nft_owners',
-									['collection_address', 'token_id', 'owner', 'contract_type_id'],
-									[[contractAddress, tokenId, owner, tokenTypeId]],
-									['collection_address', 'token_id']
-								);
-							}
-						}
-					} catch (error) {
-						log(`Error fetching NFT info for token ${tokenId} in contract ${contractAddress}: ${error.message}`, 'ERROR');
+				const flushBatches = () => {
+					if (tokenBatch.length > 0) {
+						batchInsertOrUpdate(
+							'contract_tokens',
+							['contract_address', 'token_id', 'contract_type_id', 'token_uri', 'metadata'],
+							tokenBatch,
+							['contract_address', 'token_id']
+						);
+						tokenBatch = [];
 					}
-				}));
+					if (ownerBatch.length > 0) {
+						batchInsertOrUpdate(
+							'nft_owners',
+							['collection_address', 'token_id', 'owner', 'contract_type_id'],
+							ownerBatch,
+							['collection_address', 'token_id']
+						);
+						ownerBatch = [];
+					}
+				};
 
-				await Promise.allSettled(tokenPromises);
+				for (let i = 0; i < allTokens.length; i += lookupChunkSize) {
+					const chunk = allTokens.slice(i, i + lookupChunkSize);
+					const tokenPromises = chunk.map(tokenId => limit(async () => {
+						try {
+							const nftInfoPayload = { all_nft_info: { token_id: String(tokenId) } };
+							const nftInfoResponse = await sendContractQueryGrpc(contractAddress, nftInfoPayload, true);
+
+							const rows = buildNftInfoRows({
+								contractAddress,
+								tokenId,
+								tokenTypeId,
+								nftInfoResponse
+							});
+
+							if (!rows) {
+								log(`No NFT info returned for token ${tokenId} in contract ${contractAddress}; leaving existing token and owner rows unchanged.`, 'DEBUG');
+								return;
+							}
+
+							tokenBatch.push(rows.tokenRow);
+							if (rows.ownerRow) ownerBatch.push(rows.ownerRow);
+						} catch (error) {
+							log(`Error fetching NFT info for token ${tokenId} in contract ${contractAddress}: ${error.message}`, 'ERROR');
+						}
+					}));
+
+					await Promise.allSettled(tokenPromises);
+					flushBatches();
+				}
+				flushBatches();
+				log(`Processed ${allTokens.length} tokens with ownership for contract ${contractAddress}`, 'INFO');
 			} else {
 				log(`No tokens retrieved for contract ${contractAddress}. Skipping...`, 'INFO');
 			}
 
-			batchProgressUpdates.push({ step: 'fetchTokensAndOwners', completed: 0, lastProcessed: contractAddress });
+			updateTokenProgress(contractAddress);
 			await new Promise(resolve => setTimeout(resolve, delayBetweenBatches));
 		}
 
-		batchProgressUpdates.push({ step: 'fetchTokensAndOwners', completed: 1 });
-		batchProgressUpdates.forEach(update => updateProgress(update.step, update.completed, update.lastProcessed));
+		if (lastProcessedContract) updateTokenProgress(lastProcessedContract, true);
+		updateProgress('fetchTokensAndOwners', 1);
 		log('Finished processing tokens and ownership for all contracts.', 'INFO');
 	} catch (error) {
 		log(`Error in fetchTokensAndOwners: ${error.message}`, 'ERROR');

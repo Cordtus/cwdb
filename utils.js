@@ -11,7 +11,13 @@ const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
 // Initialize the SQLite database
-const db = new Database(path.join(__dirname, './data/indexer.db'));
+const configuredDbPath = process.env.CWDB_DATABASE_PATH || config.databasePath || './data/indexer.db';
+const dbPath = path.isAbsolute(configuredDbPath)
+	? configuredDbPath
+	: path.join(__dirname, configuredDbPath);
+const dbDir = path.dirname(dbPath);
+if (!fs.existsSync(dbDir)) fs.mkdirSync(dbDir, { recursive: true });
+const db = new Database(dbPath);
 db.pragma('journal_mode = WAL');
 db.pragma('synchronous = NORMAL');
 
@@ -24,7 +30,9 @@ export { db };
  */
 export function log(message, level = 'INFO') {
 	const logLevels = { 'ERROR': 0, 'INFO': 1, 'DEBUG': 2 };
-	const currentLogLevel = config.logLevel || 'INFO';
+	const envLogLevel = process.env.CWDB_LOG_LEVEL?.trim().toUpperCase();
+	const configuredLogLevel = config.logLevel || 'INFO';
+	const currentLogLevel = logLevels[envLogLevel] !== undefined ? envLogLevel : configuredLogLevel;
 
 	if (logLevels[level] > logLevels[currentLogLevel]) return;
 
@@ -142,60 +150,37 @@ export function batchInsertOrUpdate(tableName, columns, values, uniqueColumns) {
 		return;
 	}
 
-	const placeholders = values[0].map(() => '?').join(', ');
-	const updateConditions = Array.isArray(uniqueColumns)
-		? uniqueColumns.map((col) => `${col} = ?`).join(' AND ')
-		: `${uniqueColumns} = ?`;
+	const uniqueCols = Array.isArray(uniqueColumns) ? uniqueColumns : [uniqueColumns];
+	const nonUniqueCols = columns.filter(col => !uniqueCols.includes(col));
 
-	const sqlInsert = `
-		INSERT INTO ${tableName} (${columns.join(', ')})
-		VALUES (${placeholders})
-	`;
-	const sqlUpdate = `
-		UPDATE ${tableName}
-		SET ${columns.map((col) => `${col} = ?`).join(', ')}
-		WHERE ${updateConditions}
-	`;
+	const placeholders = columns.map(() => '?').join(', ');
+	const onConflictSet = nonUniqueCols.length > 0
+		? `ON CONFLICT(${uniqueCols.join(', ')}) DO UPDATE SET ${nonUniqueCols.map(col => `${col} = excluded.${col}`).join(', ')}`
+		: `ON CONFLICT(${uniqueCols.join(', ')}) DO NOTHING`;
 
-	const insert = db.prepare(sqlInsert);
-	const update = db.prepare(sqlUpdate);
+	const sql = `INSERT INTO ${tableName} (${columns.join(', ')}) VALUES (${placeholders}) ${onConflictSet}`;
+	const stmt = db.prepare(sql);
 
 	const transaction = db.transaction((rows) => {
 		for (const row of rows) {
 			try {
-				const uniqueValues = Array.isArray(uniqueColumns)
-					? uniqueColumns.map((col) => row[columns.indexOf(col)])
-					: [row[columns.indexOf(uniqueColumns)]];
-
 				const sanitizedRow = row.map((val) => {
 					if (typeof val === 'object' && val !== null) {
 						return JSON.stringify(val);
 					}
 					return val !== null ? val : null;
 				});
-
-				log(`Processing row: ${sanitizedRow}`, 'DEBUG');
-
-				const existingRow = db
-					.prepare(`SELECT * FROM ${tableName} WHERE ${updateConditions}`)
-					.get(...uniqueValues);
-
-				if (existingRow) {
-					update.run([...sanitizedRow, ...uniqueValues]);
-					log(`Updated row in ${tableName} where ${updateConditions} with values ${JSON.stringify(uniqueValues)}`, 'DEBUG');
-				} else {
-					insert.run(sanitizedRow);
-					log(`Inserted new row into ${tableName}`, 'DEBUG');
-				}
+				stmt.run(sanitizedRow);
 			} catch (error) {
-				log(`Failed to insert or update row in ${tableName}: ${error.message}`, 'ERROR');
+				log(`Failed to upsert row in ${tableName}: ${error.message}`, 'ERROR');
+				throw error;
 			}
 		}
 	});
 
 	try {
 		transaction(values);
-		log(`Successfully processed ${values.length} rows in ${tableName}`, 'DEBUG');
+		log(`Upserted ${values.length} rows in ${tableName}`, 'DEBUG');
 	} catch (error) {
 		log(`Failed to process rows in ${tableName}: ${error.message}`, 'ERROR');
 		throw error;

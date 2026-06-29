@@ -37,7 +37,7 @@ export function initializeDatabase(isTest = false) {
       creator CHAR(68),
       admin CHAR(68),
       label TEXT,
-      tokens_minted INTEGER DEFAULT 0,
+      tokens_minted TEXT DEFAULT '0',
       created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
       FOREIGN KEY (code_id) REFERENCES code_ids(code_id),
       FOREIGN KEY (type_id) REFERENCES contract_types(id)
@@ -70,7 +70,7 @@ export function initializeDatabase(isTest = false) {
     `CREATE TABLE IF NOT EXISTS cw20_owners (
       contract_address CHAR(68) NOT NULL,
       owner_address CHAR(68) NOT NULL,
-      balance NUMERIC NOT NULL DEFAULT 0,
+      balance TEXT NOT NULL DEFAULT '0',
       last_updated TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
       PRIMARY KEY (contract_address, owner_address),
       FOREIGN KEY (contract_address) REFERENCES contracts(address)
@@ -96,6 +96,7 @@ export function initializeDatabase(isTest = false) {
     `CREATE INDEX IF NOT EXISTS idx_contract_history_address ON contract_history(contract_address)`,
     `CREATE INDEX IF NOT EXISTS idx_contract_history_operation ON contract_history(operation_id)`,
     `CREATE INDEX IF NOT EXISTS idx_contract_history_updated ON contract_history(updated_at)`,
+    `CREATE UNIQUE INDEX IF NOT EXISTS idx_contract_history_unique ON contract_history(contract_address, operation_id, code_id, updated_at)`,
     `CREATE INDEX IF NOT EXISTS idx_contract_tokens_address ON contract_tokens(contract_address)`,
     `CREATE INDEX IF NOT EXISTS idx_nft_owners_collection ON nft_owners(collection_address)`,
     `CREATE INDEX IF NOT EXISTS idx_nft_owners_owner ON nft_owners(owner)`,
@@ -138,6 +139,7 @@ export function initializeDatabase(isTest = false) {
       `);
       insertOpTypes.run('CONTRACT_CODE_HISTORY_OPERATION_TYPE_INIT');
       insertOpTypes.run('CONTRACT_CODE_HISTORY_OPERATION_TYPE_MIGRATE');
+      insertOpTypes.run('CONTRACT_CODE_HISTORY_OPERATION_TYPE_GENESIS');
 
       // For test mode, initialize progress steps
       if (isTest) {
